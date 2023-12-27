@@ -9,7 +9,7 @@ import os
 from setuptools import find_packages, setup
 
 # TODO: read pinned Botorch version from a shared source
-PINNED_BOTORCH_VERSION = "0.9.4"
+PINNED_BOTORCH_VERSION = "0.9.5"
 
 if os.environ.get("ALLOW_BOTORCH_LATEST"):
     # allows a more recent previously installed version of botorch to remain
@@ -28,7 +28,7 @@ REQUIRES = [
     "ipywidgets",
     # Needed for compatibility with ipywidgets >= 8.0.0
     "plotly>=5.12.0",
-    "typeguard==2.13.3",
+    "typeguard",
     "pyre-extensions",
 ]
 
@@ -73,7 +73,6 @@ TUTORIAL_REQUIRES = UNITTEST_REQUIRES + [
     "pyro-ppl",  # Required for to call run_inference.
     "pytorch-lightning",  # For the early stopping tutorial.
     "papermill",  # For executing the tutorials.
-    "memory_profiler",  # For measuring memory usage of the tutorials.
 ]
 
 

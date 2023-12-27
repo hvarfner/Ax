@@ -6,13 +6,14 @@
 
 from __future__ import annotations
 
-from abc import ABCMeta, abstractmethod
+from abc import ABCMeta, abstractmethod, abstractproperty
+from copy import deepcopy
 from enum import Enum
 from math import inf
 from typing import Dict, List, Optional, Tuple, Type, Union
 from warnings import warn
 
-from ax.core.types import TParamValue
+from ax.core.types import TParamValue, TParamValueList
 from ax.exceptions.core import UserInputError
 from ax.utils.common.base import SortableBase
 from ax.utils.common.typeutils import not_none
@@ -27,6 +28,13 @@ FIXED_CHOICE_PARAM_ERROR = (
     "ChoiceParameters require multiple feasible values. "
     "Please use FixedParameter instead when setting a single possible value."
 )
+REPR_FLAGS_IF_TRUE_ONLY = [
+    "is_fidelity",
+    "is_task",
+    "is_hierarchical",
+    "log_scale",
+    "logit_scale",
+]
 
 
 class ParameterType(Enum):
@@ -141,11 +149,74 @@ class Parameter(SortableBase, metaclass=ABCMeta):
         return str(self)
 
     def _base_repr(self) -> str:
-        return (
+        ret_val = (
             f"{self.__class__.__name__}("
             f"name='{self._name}', "
             f"parameter_type={self.parameter_type.name}, "
+            f"{self.domain_repr}"
         )
+
+        # Add binary flags.
+        for flag in self.available_flags:
+            val = getattr(self, flag, False)
+            if flag not in REPR_FLAGS_IF_TRUE_ONLY or (
+                flag in REPR_FLAGS_IF_TRUE_ONLY and val is True
+            ):
+                ret_val += f", {flag}={val}"
+
+        # Add target_value if one exists.
+        if self.target_value is not None:
+            tval_rep = self.target_value
+            if self.parameter_type == ParameterType.STRING:
+                tval_rep = f"'{tval_rep}'"
+            ret_val += f", target_value={tval_rep}"
+
+        return ret_val
+
+    @abstractproperty
+    def domain_repr(self) -> str:
+        """Returns a string representation of the domain."""
+        pass
+
+    @property
+    def available_flags(self) -> List[str]:
+        """List of boolean attributes that can be set on this parameter."""
+        return ["is_fidelity"]
+
+    @property
+    def summary_dict(
+        self,
+    ) -> Dict[str, Union[TParamValueList, TParamValue, str, List[str]]]:
+
+        # Assemble dict.
+        summary_dict = {
+            "name": self.name,
+            "type": self.__class__.__name__.removesuffix("Parameter"),
+            "domain": self.domain_repr,
+            "parameter_type": self.parameter_type.name.lower(),
+        }
+
+        # Extract flags.
+        flags = []
+        for flag in self.available_flags:
+            flag_val = getattr(self, flag, None)
+            flag_repr = flag.removeprefix("is_")
+            if flag == "sort_values":
+                flag_repr = "sorted"
+            if flag_val is True:
+                flags.append(flag_repr)
+            elif flag_val is False and flag not in REPR_FLAGS_IF_TRUE_ONLY:
+                flags.append("un" + flag_repr)
+
+        # Add flags, target_values, and dependents if present.
+        if flags:
+            summary_dict["flags"] = ", ".join(flags)
+        if getattr(self, "is_fidelity", False) or getattr(self, "is_task", False):
+            summary_dict["target_value"] = self.target_value
+        if getattr(self, "is_hierarchical", False):
+            summary_dict["dependents"] = self.dependents
+
+        return summary_dict
 
 
 class RangeParameter(Parameter):
@@ -406,23 +477,21 @@ class RangeParameter(Parameter):
 
     def __repr__(self) -> str:
         ret_val = self._base_repr()
-        ret_val += f"range=[{self._lower}, {self._upper}]"
 
-        if self._log_scale:
-            ret_val += f", log_scale={self._log_scale}"
-
-        if self._logit_scale:
-            ret_val += f", logit_scale={self._logit_scale}"
-
-        if self._digits:
+        if self._digits is not None:
             ret_val += f", digits={self._digits}"
 
-        if self.is_fidelity:
-            ret_val += (
-                f", fidelity={self.is_fidelity}, target_value={self.target_value}"
-            )
-
         return ret_val + ")"
+
+    @property
+    def available_flags(self) -> List[str]:
+        """List of boolean attributes that can be set on this parameter."""
+        return super().available_flags + ["log_scale", "logit_scale"]
+
+    @property
+    def domain_repr(self) -> str:
+        """Returns a string representation of the domain."""
+        return f"range={[self.lower, self.upper]}"
 
 
 class ChoiceParameter(Parameter):
@@ -600,31 +669,31 @@ class ChoiceParameter(Parameter):
             is_fidelity=self._is_fidelity,
             target_value=self._target_value,
             sort_values=self._sort_values,
-            dependents=self._dependents,
+            dependents=deepcopy(self._dependents),
         )
 
     def __repr__(self) -> str:
         ret_val = self._base_repr()
-        ret_val += f"values={self._values}, "
-        ret_val += f"is_ordered={self._is_ordered}, "
-        ret_val += f"sort_values={self._sort_values}"
-
-        if self._is_task:
-            ret_val += f", is_task={self._is_task}"
-
-        if self._is_fidelity:
-            ret_val += f", is_fidelity={self.is_fidelity}"
-
-        if self.target_value is not None:
-            tval_rep = self.target_value
-            if self.parameter_type == ParameterType.STRING:
-                tval_rep = f"'{tval_rep}'"
-            ret_val += f", target_value={tval_rep}"
 
         if self._dependents:
             ret_val += f", dependents={self._dependents}"
 
         return ret_val + ")"
+
+    @property
+    def available_flags(self) -> List[str]:
+        """List of boolean attributes that can be set on this parameter."""
+        return super().available_flags + [
+            "is_ordered",
+            "is_hierarchical",
+            "is_task",
+            "sort_values",
+        ]
+
+    @property
+    def domain_repr(self) -> str:
+        """Returns a string representation of the domain."""
+        return f"values={self.values}"
 
 
 class FixedParameter(Parameter):
@@ -716,14 +785,17 @@ class FixedParameter(Parameter):
 
     def __repr__(self) -> str:
         ret_val = self._base_repr()
-
-        if self._parameter_type == ParameterType.STRING:
-            ret_val += f"value='{self._value}'"
-        else:
-            ret_val += f"value={self._value}"
-
-        if self._is_fidelity:
-            ret_val += (
-                f", fidelity={self.is_fidelity}, target_value={self.target_value}"
-            )
         return ret_val + ")"
+
+    @property
+    def available_flags(self) -> List[str]:
+        """List of boolean attributes that can be set on this parameter."""
+        return super().available_flags + ["is_hierarchical"]
+
+    @property
+    def domain_repr(self) -> str:
+        """Returns a string representation of the domain."""
+        if self._parameter_type == ParameterType.STRING:
+            return f"value='{self._value}'"
+        else:
+            return f"value={self._value}"

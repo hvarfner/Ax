@@ -4,6 +4,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import itertools
 from collections import namedtuple
 from logging import INFO, WARN
@@ -21,7 +22,10 @@ from ax.core.optimization_config import (
 )
 from ax.core.outcome_constraint import ObjectiveThreshold
 from ax.core.types import ComparisonOp
+from ax.modelbridge.generation_node import GenerationStep
+from ax.modelbridge.generation_strategy import GenerationStrategy
 from ax.modelbridge.registry import Models
+from ax.service.scheduler import Scheduler
 from ax.service.utils.report_utils import (
     _format_comparison_string,
     _get_cross_validation_plots,
@@ -39,7 +43,10 @@ from ax.service.utils.report_utils import (
     FEASIBLE_COL_NAME,
     get_standard_plots,
     plot_feature_importance_by_feature_plotly,
+    select_baseline_arm,
+    warn_if_unpredictable_metrics,
 )
+from ax.service.utils.scheduler_options import SchedulerOptions
 from ax.utils.common.testutils import TestCase
 from ax.utils.common.typeutils import checked_cast, not_none
 from ax.utils.testing.core_stubs import (
@@ -351,6 +358,7 @@ class ReportUtilsTest(TestCase):
         )
         exp = get_branin_experiment(with_batch=True, minimize=True)
         exp.trials[0].run()
+        exp.trials[0].mark_completed()
         model = Models.BOTORCH_MODULAR(experiment=exp, data=exp.fetch_data())
         for gsa, true_objective_metric_name in itertools.product(
             [False, True], ["branin", None]
@@ -470,13 +478,15 @@ class ReportUtilsTest(TestCase):
             generator_run=Models.SOBOL(search_space=exp.search_space).gen(n=1)
         )
         exp.trials[1].run()
+        for t in exp.trials.values():
+            t.mark_completed()
         plots = get_standard_plots(
             experiment=exp,
             model=Models.BOTORCH_MODULAR(experiment=exp, data=exp.fetch_data()),
             true_objective_metric_name="branin",
         )
 
-        self.assertEqual(len(plots), 9)
+        self.assertEqual(len(plots), 10)
         self.assertTrue(all(isinstance(plot, go.Figure) for plot in plots))
         self.assertIn(
             "Objective branin_map vs. True Objective Metric branin",
@@ -578,6 +588,7 @@ class ReportUtilsTest(TestCase):
                 experiment=experiment,
                 optimization_config=None,
                 comparison_arm_names=comparison_arm_names,
+                baseline_arm_name=BASELINE_ARM_NAME,
             )
 
             output_text = _format_comparison_string(
@@ -599,6 +610,7 @@ class ReportUtilsTest(TestCase):
                 experiment=experiment,
                 optimization_config=None,
                 comparison_arm_names=bad_comparison_arm_names,
+                baseline_arm_name=BASELINE_ARM_NAME,
             )
             self.assertEqual(bad_result, None)
 
@@ -642,6 +654,7 @@ class ReportUtilsTest(TestCase):
                 experiment=experiment,
                 optimization_config=optimization_config,
                 comparison_arm_names=comparison_arm_names,
+                baseline_arm_name=BASELINE_ARM_NAME,
             )
 
             output_text = _format_comparison_string(
@@ -725,6 +738,7 @@ class ReportUtilsTest(TestCase):
                 experiment=experiment,
                 optimization_config=None,
                 comparison_arm_names=bad_comparison_arm_names,
+                baseline_arm_name=BASELINE_ARM_NAME,
             )
             self.assertEqual(bad_result, None)
 
@@ -767,6 +781,7 @@ class ReportUtilsTest(TestCase):
                         experiment=experiment,
                         optimization_config=None,
                         comparison_arm_names=comparison_arm_names,
+                        baseline_arm_name=BASELINE_ARM_NAME,
                     ),
                     None,
                 )
@@ -793,6 +808,7 @@ class ReportUtilsTest(TestCase):
                         experiment=experiment,
                         optimization_config=None,
                         comparison_arm_names=None,
+                        baseline_arm_name=BASELINE_ARM_NAME,
                     ),
                     None,
                 )
@@ -824,6 +840,7 @@ class ReportUtilsTest(TestCase):
                         experiment=exp_no_opt,
                         optimization_config=None,
                         comparison_arm_names=comparison_arm_names,
+                        baseline_arm_name=BASELINE_ARM_NAME,
                     ),
                     None,
                 )
@@ -875,6 +892,7 @@ class ReportUtilsTest(TestCase):
                         experiment=experiment,
                         optimization_config=None,
                         comparison_arm_names=comparison_arm_names,
+                        baseline_arm_name=BASELINE_ARM_NAME,
                     ),
                     None,
                 )
@@ -898,6 +916,7 @@ class ReportUtilsTest(TestCase):
                         experiment=experiment,
                         optimization_config=None,
                         comparison_arm_names=comparison_arm_not_found,
+                        baseline_arm_name=BASELINE_ARM_NAME,
                     ),
                     None,
                 )
@@ -915,18 +934,19 @@ class ReportUtilsTest(TestCase):
             "ax.service.utils.report_utils.exp_to_df",
             return_value=arms_df,
         ):
-            baseline_arm_name = "not_baseline_arm_in_dataframe"
             experiment_with_status_quo = experiment
             experiment_with_status_quo.status_quo = Arm(
-                name=baseline_arm_name,
+                name=BASELINE_ARM_NAME,
                 parameters={"x1": 0, "x2": 0},
             )
+            baseline_arm_name = "not_baseline_arm_in_dataframe"
             with self.assertLogs("ax", level=INFO) as log:
                 self.assertEqual(
                     compare_to_baseline(
                         experiment=experiment_with_status_quo,
                         optimization_config=None,
                         comparison_arm_names=comparison_arm_names,
+                        baseline_arm_name=baseline_arm_name,
                     ),
                     None,
                 )
@@ -1049,17 +1069,253 @@ class ReportUtilsTest(TestCase):
                     experiment=experiment,
                     optimization_config=None,
                     comparison_arm_names=comparison_arm_names,
+                    baseline_arm_name=BASELINE_ARM_NAME,
                 ),
             )
 
             expected_result = (
                 preamble
-                + " * "
+                + " \n* "
                 + output_text_0
-                + " * "
+                + " \n* "
                 + output_text_1
-                + " * "
+                + " \n* "
                 + output_text_3
             )
 
             self.assertEqual(result, expected_result)
+
+    def test_compare_to_baseline_equal(self) -> None:
+        """Test case where baseline value is equal to optimal value"""
+        self.maxDiff = None
+        OBJECTIVE_METRIC = "foo"
+        custom_baseline_arm_name = "custom_baseline"
+
+        data = [
+            {
+                "trial_index": 0,
+                "arm_name": custom_baseline_arm_name,
+                OBJECTIVE_METRIC: 0.2,
+            },
+            {"trial_index": 1, "arm_name": "dummy", OBJECTIVE_METRIC: 0.5},
+            {"trial_index": 2, "arm_name": "optimal", OBJECTIVE_METRIC: 0.5},
+            {"trial_index": 3, "arm_name": "equal", OBJECTIVE_METRIC: 0.2},
+        ]
+        arms_df = pd.DataFrame(data)
+
+        true_obj_metric = Metric(name=OBJECTIVE_METRIC, lower_is_better=True)
+        experiment = Experiment(
+            search_space=get_branin_search_space(),
+            tracking_metrics=[true_obj_metric],
+        )
+
+        optimization_config = OptimizationConfig(
+            objective=Objective(metric=true_obj_metric, minimize=True),
+            outcome_constraints=[],
+        )
+        experiment.optimization_config = optimization_config
+
+        comparison_arm_names = ["equal"]
+
+        with patch(
+            "ax.service.utils.report_utils.exp_to_df",
+            return_value=arms_df,
+        ):
+            with self.assertLogs("ax", level=INFO) as log:
+                result = compare_to_baseline(
+                    experiment=experiment,
+                    optimization_config=optimization_config,
+                    comparison_arm_names=comparison_arm_names,
+                    baseline_arm_name=custom_baseline_arm_name,
+                )
+                self.assertEqual(result, None)
+                self.assertTrue(
+                    any(
+                        (
+                            "compare_to_baseline:"
+                            f" comparison arm equal"
+                            f" did not beat baseline arm {custom_baseline_arm_name}."
+                        )
+                        in log_str
+                        for log_str in log.output
+                    ),
+                    log.output,
+                )
+
+    def test_compare_to_baseline_select_baseline_arm(self) -> None:
+        OBJECTIVE_METRIC = "objective"
+        true_obj_metric = Metric(name=OBJECTIVE_METRIC, lower_is_better=True)
+        experiment = Experiment(
+            search_space=get_branin_search_space(),
+            tracking_metrics=[true_obj_metric],
+        )
+
+        # specified baseline
+        data = [
+            {
+                "trial_index": 0,
+                "arm_name": "m_0",
+                OBJECTIVE_METRIC: 0.2,
+            },
+            {
+                "trial_index": 1,
+                "arm_name": BASELINE_ARM_NAME,
+                OBJECTIVE_METRIC: 0.2,
+            },
+            {
+                "trial_index": 2,
+                "arm_name": "status_quo",
+                OBJECTIVE_METRIC: 0.2,
+            },
+        ]
+        arms_df = pd.DataFrame(data)
+        self.assertEqual(
+            select_baseline_arm(
+                experiment=experiment,
+                arms_df=arms_df,
+                baseline_arm_name=BASELINE_ARM_NAME,
+            ),
+            (BASELINE_ARM_NAME, False),
+        )
+
+        # specified baseline arm not in trial
+        wrong_baseline_name = "wrong_baseline_name"
+        with self.assertRaisesRegex(
+            ValueError,
+            "compare_to_baseline: baseline row: .*" + " not found in arms",
+        ):
+            select_baseline_arm(
+                experiment=experiment,
+                arms_df=arms_df,
+                baseline_arm_name=wrong_baseline_name,
+            ),
+
+        # status quo baseline arm
+        experiment_with_status_quo = copy.deepcopy(experiment)
+        experiment_with_status_quo.status_quo = Arm(
+            name="status_quo",
+            parameters={"x1": 0, "x2": 0},
+        )
+        self.assertEqual(
+            select_baseline_arm(
+                experiment=experiment_with_status_quo,
+                arms_df=arms_df,
+                baseline_arm_name=None,
+            ),
+            ("status_quo", False),
+        )
+        # first arm from trials
+        custom_arm = Arm(name="m_0", parameters={"x1": 0.1, "x2": 0.2})
+        experiment.new_trial().add_arm(custom_arm)
+        self.assertEqual(
+            select_baseline_arm(
+                experiment=experiment,
+                arms_df=arms_df,
+                baseline_arm_name=None,
+            ),
+            ("m_0", True),
+        )
+
+        # none selected
+        experiment_with_no_valid_baseline = Experiment(
+            search_space=get_branin_search_space(),
+            tracking_metrics=[true_obj_metric],
+        )
+        experiment_with_no_valid_baseline.status_quo = Arm(
+            name="not found",
+            parameters={"x1": 0, "x2": 0},
+        )
+        custom_arm = Arm(name="also not found", parameters={"x1": 0.1, "x2": 0.2})
+        experiment_with_no_valid_baseline.new_trial().add_arm(custom_arm)
+        with self.assertRaisesRegex(
+            ValueError, "compare_to_baseline: could not find valid baseline arm"
+        ):
+            select_baseline_arm(
+                experiment=experiment_with_no_valid_baseline,
+                arms_df=arms_df,
+                baseline_arm_name=None,
+            )
+
+    def test_warn_if_unpredictable_metrics(self) -> None:
+        expected_msg = (
+            "The following metric(s) are behaving unpredictably and may be noisy or "
+            "misconfigured: ['branin']. Please check that they are measuring the "
+            "intended quantity, and are expected to vary reliably as a function of "
+            "your parameters."
+        )
+
+        # Create scheduler and run a few trials.
+        exp = get_branin_experiment()
+        gs = GenerationStrategy(
+            steps=[
+                GenerationStep(
+                    model=Models.SOBOL,
+                    num_trials=3,
+                    min_trials_observed=3,
+                    max_parallelism=3,
+                ),
+                GenerationStep(model=Models.GPEI, num_trials=-1, max_parallelism=3),
+            ]
+        )
+        gs.experiment = exp
+        scheduler = Scheduler(
+            generation_strategy=gs, experiment=exp, options=SchedulerOptions()
+        )
+        scheduler.run_n_trials(1)
+        msg = warn_if_unpredictable_metrics(
+            experiment=exp,
+            generation_strategy=gs,
+            model_fit_threshold=1.0,
+        )
+        self.assertIsNone(msg)
+
+        scheduler.run_n_trials(3)
+
+        # Set fitted model to None to test refitting.
+        scheduler.generation_strategy._curr.model_spec_to_gen_from._fitted_model = None
+
+        # Threshold 1.0 (should always generate a warning)
+        msg = warn_if_unpredictable_metrics(
+            experiment=exp,
+            generation_strategy=gs,
+            model_fit_threshold=1.0,
+        )
+        self.assertEqual(msg, expected_msg)
+
+        # Threshold -1.0 (should never generate a warning)
+        msg = warn_if_unpredictable_metrics(
+            experiment=exp,
+            generation_strategy=gs,
+            model_fit_threshold=-1.0,
+        )
+        self.assertIsNone(msg)
+
+        # Test with no optimization config.
+        exp._tracking_metrics = exp.metrics
+        exp._optimization_config = None
+        msg = warn_if_unpredictable_metrics(
+            experiment=exp,
+            generation_strategy=gs,
+            model_fit_threshold=1.0,
+        )
+        self.assertEqual(msg, expected_msg)
+
+        # Test with manually specified metric_names.
+        msg = warn_if_unpredictable_metrics(
+            experiment=exp,
+            generation_strategy=gs,
+            model_fit_threshold=1.0,
+            metric_names=["branin"],
+        )
+        self.assertEqual(msg, expected_msg)
+
+        # Test with metric name that isn't in the experiment.
+        with self.assertRaisesRegex(
+            ValueError, "Invalid metric names: {'bad_metric_name'}"
+        ):
+            warn_if_unpredictable_metrics(
+                experiment=exp,
+                generation_strategy=gs,
+                model_fit_threshold=1.0,
+                metric_names=["bad_metric_name"],
+            )

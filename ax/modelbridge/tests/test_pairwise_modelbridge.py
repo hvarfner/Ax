@@ -56,17 +56,13 @@ class PairwiseModelBridgeTest(TestCase):
             ),
         ]
         observation_features = [
-            # pyre-fixme[6]: For 2nd param expected `Optional[int64]` but got `int`.
             ObservationFeatures(parameters={"y1": 0.1, "y2": 0.2}, trial_index=0),
-            # pyre-fixme[6]: For 2nd param expected `Optional[int64]` but got `int`.
             ObservationFeatures(parameters={"y1": 0.3, "y2": 0.4}, trial_index=0),
         ]
         observation_features_with_metadata = [
-            # pyre-fixme[6]: For 2nd param expected `Optional[int64]` but got `int`.
             ObservationFeatures(parameters={"y1": 0.1, "y2": 0.2}, trial_index=0),
             ObservationFeatures(
                 parameters={"y1": 0.3, "y2": 0.4},
-                # pyre-fixme[6]: For 2nd param expected `Optional[int64]` but got `int`.
                 trial_index=0,
                 metadata={"metadata_key": "metadata_val"},
             ),
@@ -74,7 +70,7 @@ class PairwiseModelBridgeTest(TestCase):
         parameters = ["y1", "y2"]
         outcomes = ["pairwise_pref_query"]
 
-        datasets, candidate_metadata = pmb._convert_observations(
+        datasets, _, candidate_metadata = pmb._convert_observations(
             observation_data=observation_data,
             observation_features=observation_features,
             outcomes=outcomes,
@@ -85,7 +81,7 @@ class PairwiseModelBridgeTest(TestCase):
         self.assertTrue(isinstance(datasets[0], RankingDataset))
         self.assertTrue(candidate_metadata is None)
 
-        datasets, candidate_metadata = pmb._convert_observations(
+        datasets, _, candidate_metadata = pmb._convert_observations(
             observation_data=observation_data,
             observation_features=observation_features_with_metadata,
             outcomes=outcomes,

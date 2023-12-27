@@ -49,7 +49,7 @@ class SchedulerCreatedRecord:
             ),
             generation_strategy_created_record=(
                 GenerationStrategyCreatedRecord.from_generation_strategy(
-                    generation_strategy=scheduler.generation_strategy
+                    generation_strategy=scheduler.standard_generation_strategy
                 )
             ),
             scheduler_total_trials=scheduler.options.total_trials,
@@ -68,7 +68,7 @@ class SchedulerCreatedRecord:
             ),
             transformed_dimensionality=_get_max_transformed_dimensionality(
                 search_space=scheduler.experiment.search_space,
-                generation_strategy=scheduler.generation_strategy,
+                generation_strategy=scheduler.standard_generation_strategy,
             ),
         )
 
@@ -105,6 +105,8 @@ class SchedulerCompletedRecord:
     model_fit_generalization: float
     model_std_generalization: float
 
+    improvement_over_baseline: float
+
     num_metric_fetch_e_encountered: int
     num_trials_bad_due_to_err: int
 
@@ -132,6 +134,15 @@ class SchedulerCompletedRecord:
             model_fit_quality = float("-inf")
             model_std_quality = float("-inf")
 
+        try:
+            improvement_over_baseline = scheduler.get_improvement_over_baseline()
+        except Exception as e:
+            warn(
+                "Encountered exception in computing improvement over baseline: "
+                + str(e)
+            )
+            improvement_over_baseline = float("-inf")
+
         return cls(
             experiment_completed_record=ExperimentCompletedRecord.from_experiment(
                 experiment=scheduler.experiment
@@ -141,6 +152,7 @@ class SchedulerCompletedRecord:
             model_std_quality=model_std_quality,
             model_fit_generalization=float("-inf"),  # TODO by cross_validate_by_trial
             model_std_generalization=float("-inf"),
+            improvement_over_baseline=improvement_over_baseline,
             num_metric_fetch_e_encountered=scheduler._num_metric_fetch_e_encountered,
             num_trials_bad_due_to_err=scheduler._num_trials_bad_due_to_err,
         )

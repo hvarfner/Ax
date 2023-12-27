@@ -14,6 +14,7 @@ from ax.core.parameter import (
 )
 from ax.exceptions.core import UserInputError
 from ax.utils.common.testutils import TestCase
+from ax.utils.common.typeutils import not_none
 
 
 class RangeParameterTest(TestCase):
@@ -29,9 +30,8 @@ class RangeParameterTest(TestCase):
             target_value=2,
         )
         self.param1_repr = (
-            "RangeParameter(name='x', parameter_type=FLOAT, "
-            "range=[1.0, 3.0], log_scale=True, digits=5, fidelity=True, target_"
-            "value=2.0)"
+            "RangeParameter(name='x', parameter_type=FLOAT, range=[1.0, 3.0], "
+            "is_fidelity=True, log_scale=True, target_value=2.0, digits=5)"
         )
 
         self.param2 = RangeParameter(
@@ -173,6 +173,37 @@ class RangeParameterTest(TestCase):
         with self.assertRaises(NotImplementedError):
             self.param1.dependents
 
+    def test_available_flags(self) -> None:
+        range_flags = ["is_fidelity", "log_scale", "logit_scale"]
+        self.assertListEqual(self.param1.available_flags, range_flags)
+        self.assertListEqual(self.param2.available_flags, range_flags)
+
+    def test_domain_repr(self) -> None:
+        self.assertEqual(self.param1.domain_repr, "range=[1.0, 3.0]")
+        self.assertEqual(self.param2.domain_repr, "range=[10, 15]")
+
+    def test_summary_dict(self) -> None:
+        self.assertDictEqual(
+            self.param1.summary_dict,
+            {
+                "name": "x",
+                "type": "Range",
+                "domain": "range=[1.0, 3.0]",
+                "parameter_type": "float",
+                "flags": "fidelity, log_scale",
+                "target_value": 2.0,
+            },
+        )
+        self.assertDictEqual(
+            self.param2.summary_dict,
+            {
+                "name": "y",
+                "type": "Range",
+                "domain": "range=[10, 15]",
+                "parameter_type": "int",
+            },
+        )
+
 
 class ChoiceParameterTest(TestCase):
     def setUp(self) -> None:
@@ -191,6 +222,11 @@ class ChoiceParameterTest(TestCase):
             is_task=True,
             target_value="baz",
         )
+        self.param2_repr = (
+            "ChoiceParameter(name='x', parameter_type=STRING, "
+            "values=['foo', 'bar', 'baz'], is_ordered=False, is_task=True, "
+            "sort_values=False, target_value='baz')"
+        )
         self.param3 = ChoiceParameter(
             name="x",
             parameter_type=ParameterType.STRING,
@@ -200,8 +236,8 @@ class ChoiceParameterTest(TestCase):
         )
         self.param3_repr = (
             "ChoiceParameter(name='x', parameter_type=STRING, "
-            "values=['foo', 'bar'], is_ordered=False, sort_values=False, "
-            "is_fidelity=True, target_value='bar')"
+            "values=['foo', 'bar'], is_fidelity=True, is_ordered=False, "
+            "sort_values=False, target_value='bar')"
         )
         self.param4 = ChoiceParameter(
             name="x",
@@ -308,6 +344,18 @@ class ChoiceParameterTest(TestCase):
         param_clone._values.append("boo")
         self.assertNotEqual(len(self.param1.values), len(param_clone.values))
 
+        # With dependents.
+        param = ChoiceParameter(
+            name="x",
+            parameter_type=ParameterType.STRING,
+            values=["foo", "bar", "baz"],
+            dependents={"foo": ["y", "z"], "bar": ["w"]},
+        )
+        param_clone = param.clone()
+        not_none(param_clone._dependents)["foo"] = ["y"]
+        self.assertEqual(param.dependents, {"foo": ["y", "z"], "bar": ["w"]})
+        self.assertEqual(param_clone.dependents, {"foo": ["y"], "bar": ["w"]})
+
     def test_HierarchicalValidation(self) -> None:
         self.assertFalse(self.param1.is_hierarchical)
         with self.assertRaises(NotImplementedError):
@@ -383,6 +431,69 @@ class ChoiceParameterTest(TestCase):
                 dependents={"c": "other_param"},
             )
 
+    def test_available_flags(self) -> None:
+        choice_flags = [
+            "is_fidelity",
+            "is_ordered",
+            "is_hierarchical",
+            "is_task",
+            "sort_values",
+        ]
+        self.assertListEqual(self.param1.available_flags, choice_flags)
+        self.assertListEqual(self.param2.available_flags, choice_flags)
+        self.assertListEqual(self.param3.available_flags, choice_flags)
+        self.assertListEqual(self.param4.available_flags, choice_flags)
+
+    def test_domain_repr(self) -> None:
+        self.assertEqual(self.param1.domain_repr, "values=['foo', 'bar', 'baz']")
+        self.assertEqual(self.param2.domain_repr, "values=['foo', 'bar', 'baz']")
+        self.assertEqual(self.param3.domain_repr, "values=['foo', 'bar']")
+        self.assertEqual(self.param4.domain_repr, "values=[1, 2]")
+
+    def test_summary_dict(self) -> None:
+        self.assertDictEqual(
+            self.param1.summary_dict,
+            {
+                "name": "x",
+                "type": "Choice",
+                "domain": "values=['foo', 'bar', 'baz']",
+                "parameter_type": "string",
+                "flags": "unordered, unsorted",
+            },
+        )
+        self.assertDictEqual(
+            self.param2.summary_dict,
+            {
+                "name": "x",
+                "type": "Choice",
+                "domain": "values=['foo', 'bar', 'baz']",
+                "parameter_type": "string",
+                "flags": "ordered, task, unsorted",
+                "target_value": "baz",
+            },
+        )
+        self.assertDictEqual(
+            self.param3.summary_dict,
+            {
+                "name": "x",
+                "type": "Choice",
+                "domain": "values=['foo', 'bar']",
+                "parameter_type": "string",
+                "flags": "fidelity, unordered, unsorted",
+                "target_value": "bar",
+            },
+        )
+        self.assertDictEqual(
+            self.param4.summary_dict,
+            {
+                "name": "x",
+                "type": "Choice",
+                "domain": "values=[1, 2]",
+                "parameter_type": "int",
+                "flags": "ordered, sorted",
+            },
+        )
+
 
 class FixedParameterTest(TestCase):
     def setUp(self) -> None:
@@ -390,6 +501,12 @@ class FixedParameterTest(TestCase):
             name="x", parameter_type=ParameterType.BOOL, value=True
         )
         self.param1_repr = "FixedParameter(name='x', parameter_type=BOOL, value=True)"
+        self.param2 = FixedParameter(
+            name="y", parameter_type=ParameterType.STRING, value="foo"
+        )
+        self.param2_repr = (
+            "FixedParameter(name='y', parameter_type=STRING, value='foo')"
+        )
 
     def test_BadCreations(self) -> None:
         with self.assertRaises(UserInputError):
@@ -470,6 +587,35 @@ class FixedParameterTest(TestCase):
                 #  bool, float, int, str], List[str]]]` but got `Dict[bool, str]`.
                 dependents={False: "other_param"},
             )
+
+    def test_available_flags(self) -> None:
+        fixed_flags = ["is_fidelity", "is_hierarchical"]
+        self.assertListEqual(self.param1.available_flags, fixed_flags)
+        self.assertListEqual(self.param2.available_flags, fixed_flags)
+
+    def test_domain_repr(self) -> None:
+        self.assertEqual(self.param1.domain_repr, "value=True")
+        self.assertEqual(self.param2.domain_repr, "value='foo'")
+
+    def test_summary_dict(self) -> None:
+        self.assertDictEqual(
+            self.param1.summary_dict,
+            {
+                "name": "x",
+                "type": "Fixed",
+                "domain": "value=True",
+                "parameter_type": "bool",
+            },
+        )
+        self.assertDictEqual(
+            self.param2.summary_dict,
+            {
+                "name": "y",
+                "type": "Fixed",
+                "domain": "value='foo'",
+                "parameter_type": "string",
+            },
+        )
 
 
 class ParameterEqualityTest(TestCase):

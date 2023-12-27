@@ -441,7 +441,6 @@ def compute_posterior_pareto_frontier(
                 [
                     ObservationFeatures(
                         parameters=status_quo.parameters,
-                        # pyre-fixme [6]: Expected `Optional[np.int64]` for trial_index
                         trial_index=trial_index,
                     )
                 ]
@@ -640,7 +639,6 @@ def infer_reference_point_from_experiment(
         observation_data=obs_data,
         objective_thresholds=dummy_rp,
         use_model_predictions=False,
-        transform_outcomes_and_configs=False,
     )
 
     if len(frontier_observations) == 0:
@@ -666,7 +664,6 @@ def infer_reference_point_from_experiment(
             observation_data=obs_data,
             objective_thresholds=dummy_rp,
             use_model_predictions=False,
-            transform_outcomes_and_configs=False,
         )
         opt_config._outcome_constraints = outcome_constraints  # restoring constraints
 

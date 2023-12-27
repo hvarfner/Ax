@@ -4,11 +4,10 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
 from typing import cast, List
 from unittest import mock
 from unittest.mock import MagicMock, patch
-
-import numpy as np
 
 from ax.core.arm import Arm
 from ax.core.base_trial import TrialStatus
@@ -20,19 +19,26 @@ from ax.core.search_space import SearchSpace
 from ax.core.utils import (
     get_pending_observation_features_based_on_trial_status as get_pending,
 )
-from ax.exceptions.core import DataRequiredError, UserInputError
+from ax.exceptions.core import DataRequiredError, UnsupportedError, UserInputError
 from ax.exceptions.generation_strategy import (
     GenerationStrategyCompleted,
+    GenerationStrategyMisconfiguredException,
     GenerationStrategyRepeatedPoints,
     MaxParallelismReachedException,
 )
 from ax.modelbridge.discrete import DiscreteModelBridge
 from ax.modelbridge.factory import get_sobol
+from ax.modelbridge.generation_node import GenerationNode
 from ax.modelbridge.generation_strategy import GenerationStep, GenerationStrategy
 from ax.modelbridge.model_spec import ModelSpec
 from ax.modelbridge.random import RandomModelBridge
 from ax.modelbridge.registry import Cont_X_trans, MODEL_KEY_TO_MODEL_SETUP, Models
 from ax.modelbridge.torch import TorchModelBridge
+from ax.modelbridge.transition_criterion import (
+    MaxGenerationParallelism,
+    MaxTrials,
+    MinTrials,
+)
 from ax.models.random.sobol import SobolGenerator
 from ax.utils.common.equality import same_elements
 from ax.utils.common.mock import mock_patch_method_original
@@ -212,6 +218,29 @@ class TestGenerationStrategy(TestCase):
         )
         self.assertEqual(
             str(gs2), "GenerationStrategy(name='Sobol', steps=[Sobol for all trials])"
+        )
+
+        gs3 = GenerationStrategy(
+            nodes=[
+                GenerationNode(
+                    node_name="test",
+                    model_specs=[
+                        ModelSpec(
+                            model_enum=Models.SOBOL,
+                            model_kwargs={},
+                            model_gen_kwargs={},
+                        ),
+                    ],
+                )
+            ]
+        )
+        self.assertEqual(
+            str(gs3),
+            "GenerationStrategy(name='Sobol', nodes=[GenerationNode("
+            "model_specs=[ModelSpec(model_enum=Sobol, "
+            "model_kwargs={}, model_gen_kwargs={}, model_cv_kwargs={},"
+            " )], node_name=test, gen_unlimited_trials=True, "
+            "transition_criteria=[])])",
         )
 
     def test_equality(self) -> None:
@@ -418,8 +447,8 @@ class TestGenerationStrategy(TestCase):
             ]
         )
         ftgs._curr = ftgs._steps[1]
-        self.assertEqual(ftgs._curr.index, 1)
-        self.assertEqual(ftgs.clone_reset()._curr.index, 0)
+        self.assertEqual(ftgs.current_step_index, 1)
+        self.assertEqual(ftgs.clone_reset().current_step_index, 0)
 
     def test_kwargs_passed(self) -> None:
         gs = GenerationStrategy(
@@ -529,10 +558,12 @@ class TestGenerationStrategy(TestCase):
             # attach necessary trials to fill up the Generation Strategy
             trial = exp.new_trial(sobol_generation_strategy.gen(experiment=exp))
         self.assertEqual(
-            sobol_generation_strategy.trials_as_df.head()["Generation Step"][0], 0
+            sobol_generation_strategy.trials_as_df.head()["Generation Step"][0],
+            "GenerationStep_0",
         )
         self.assertEqual(
-            sobol_generation_strategy.trials_as_df.head()["Generation Step"][2], 1
+            sobol_generation_strategy.trials_as_df.head()["Generation Step"][2],
+            "GenerationStep_1",
         )
 
     def test_max_parallelism_reached(self) -> None:
@@ -765,7 +796,7 @@ class TestGenerationStrategy(TestCase):
             # GRs now (remaining in Sobol step) even though we requested 3.
             original_pending = not_none(get_pending(experiment=exp))
             first_3_trials_obs_feats = [
-                ObservationFeatures.from_arm(arm=a, trial_index=np.int64(idx))
+                ObservationFeatures.from_arm(arm=a, trial_index=idx)
                 for idx, trial in exp.trials.items()
                 for a in trial.arms
             ]
@@ -796,6 +827,359 @@ class TestGenerationStrategy(TestCase):
                             self.assertIn(ObservationFeatures.from_arm(arm), pending[m])
                             for p in original_pending[m]:
                                 self.assertIn(p, pending[m])
+
+    def test_gen_for_multiple_trials_with_multiple_models(self) -> None:
+        exp = get_experiment_with_multi_objective()
+        sobol_GPEI_gs = GenerationStrategy(
+            steps=[
+                GenerationStep(
+                    model=Models.SOBOL,
+                    num_trials=5,
+                    model_kwargs=self.step_model_kwargs,
+                ),
+                GenerationStep(
+                    model=Models.GPEI,
+                    num_trials=-1,
+                    model_kwargs=self.step_model_kwargs,
+                ),
+            ]
+        )
+        with mock_patch_method_original(
+            mock_path=f"{ModelSpec.__module__}.ModelSpec.gen",
+            original_method=ModelSpec.gen,
+        ) as model_spec_gen_mock, mock_patch_method_original(
+            mock_path=f"{ModelSpec.__module__}.ModelSpec.fit",
+            original_method=ModelSpec.fit,
+        ) as model_spec_fit_mock:
+            # Generate first four Sobol GRs (one more to gen after that if
+            # first four become trials.
+            grs = sobol_GPEI_gs.gen_for_multiple_trials_with_multiple_models(
+                experiment=exp, num_generator_runs=3
+            )
+        self.assertEqual(len(grs), 3)
+        for gr in grs:
+            self.assertEqual(len(gr), 1)
+            self.assertIsInstance(gr[0], GeneratorRun)
+
+        # We should only fit once; refitting for each `gen` would be
+        # wasteful as there is no new data.
+        model_spec_fit_mock.assert_called_once()
+        self.assertEqual(model_spec_gen_mock.call_count, 3)
+        pending_in_each_gen = enumerate(
+            args_and_kwargs.kwargs.get("pending_observations")
+            for args_and_kwargs in model_spec_gen_mock.call_args_list
+        )
+        for gr, (idx, pending) in zip(grs, pending_in_each_gen):
+            exp.new_trial(generator_run=gr[0]).mark_running(no_runner_required=True)
+            if idx > 0:
+                prev_grs = grs[idx - 1]
+                for arm in prev_grs[0].arms:
+                    for m in pending:
+                        self.assertIn(ObservationFeatures.from_arm(arm), pending[m])
+        model_spec_gen_mock.reset_mock()
+
+        # Check case with pending features initially specified; we should get two
+        # GRs now (remaining in Sobol step) even though we requested 3.
+        original_pending = not_none(get_pending(experiment=exp))
+        first_3_trials_obs_feats = [
+            ObservationFeatures.from_arm(arm=a, trial_index=idx)
+            for idx, trial in exp.trials.items()
+            for a in trial.arms
+        ]
+        for m in original_pending:
+            self.assertTrue(
+                same_elements(original_pending[m], first_3_trials_obs_feats)
+            )
+
+        grs = sobol_GPEI_gs.gen_for_multiple_trials_with_multiple_models(
+            experiment=exp,
+            num_generator_runs=3,
+        )
+        self.assertEqual(len(grs), 2)
+        for gr in grs:
+            self.assertEqual(len(gr), 1)
+            self.assertIsInstance(gr[0], GeneratorRun)
+
+        pending_in_each_gen = enumerate(
+            args_and_kwargs[1].get("pending_observations")
+            for args_and_kwargs in model_spec_gen_mock.call_args_list
+        )
+        for gr, (idx, pending) in zip(grs, pending_in_each_gen):
+            exp.new_trial(generator_run=gr[0]).mark_running(no_runner_required=True)
+            if idx > 0:
+                prev_grs = grs[idx - 1]
+                for arm in prev_grs[0].arms:
+                    for m in pending:
+                        # In this case, we should see both the originally-pending
+                        # and the new arms as pending observation features.
+                        self.assertIn(ObservationFeatures.from_arm(arm), pending[m])
+                        for p in original_pending[m]:
+                            self.assertIn(p, pending[m])
+
+    # ---------- Tests for GenerationStrategies composed of GenerationNodes --------
+    def test_gs_setup_with_nodes(self) -> None:
+        """Test GS initalization and validation with nodes"""
+        sobol_model_spec = ModelSpec(
+            model_enum=Models.SOBOL,
+            model_kwargs={},
+            model_gen_kwargs={"n": 2},
+        )
+        node_1_criterion = [
+            MaxTrials(
+                threshold=4,
+                block_gen_if_met=False,
+                transition_to="node_2",
+                only_in_statuses=None,
+                not_in_statuses=[TrialStatus.FAILED, TrialStatus.ABANDONED],
+            ),
+            MinTrials(
+                only_in_statuses=[TrialStatus.COMPLETED, TrialStatus.EARLY_STOPPED],
+                threshold=2,
+                transition_to="node_2",
+            ),
+            MaxGenerationParallelism(
+                threshold=1,
+                only_in_statuses=[TrialStatus.RUNNING],
+                block_gen_if_met=True,
+                block_transition_if_unmet=False,
+            ),
+        ]
+
+        # check error raised if node names are not unique
+        with self.assertRaisesRegex(
+            GenerationStrategyMisconfiguredException, "All node names"
+        ):
+            GenerationStrategy(
+                nodes=[
+                    GenerationNode(
+                        node_name="node_1",
+                        transition_criteria=node_1_criterion,
+                        model_specs=[sobol_model_spec],
+                    ),
+                    GenerationNode(
+                        node_name="node_1",
+                        model_specs=[sobol_model_spec],
+                    ),
+                ],
+            )
+        # check error raised if transition to arguemnt is not valid
+        with self.assertRaisesRegex(
+            GenerationStrategyMisconfiguredException, "`transition_to` argument"
+        ):
+            GenerationStrategy(
+                nodes=[
+                    GenerationNode(
+                        node_name="node_1",
+                        transition_criteria=node_1_criterion,
+                        model_specs=[sobol_model_spec],
+                    ),
+                    GenerationNode(
+                        node_name="node_3",
+                        model_specs=[sobol_model_spec],
+                    ),
+                ],
+            )
+
+        # check error raised if provided both steps and nodes
+        with self.assertRaisesRegex(
+            GenerationStrategyMisconfiguredException, "either steps or nodes"
+        ):
+            GenerationStrategy(
+                nodes=[
+                    GenerationNode(
+                        node_name="node_1",
+                        transition_criteria=node_1_criterion,
+                        model_specs=[sobol_model_spec],
+                    ),
+                    GenerationNode(
+                        node_name="node_3",
+                        model_specs=[sobol_model_spec],
+                    ),
+                ],
+                steps=[
+                    GenerationStep(
+                        model=Models.SOBOL,
+                        num_trials=5,
+                        model_kwargs=self.step_model_kwargs,
+                    ),
+                    GenerationStep(
+                        model=Models.GPEI,
+                        num_trials=-1,
+                        model_kwargs=self.step_model_kwargs,
+                    ),
+                ],
+            )
+
+        # check error raised if provided both steps and nodes under node list
+        with self.assertRaisesRegex(
+            GenerationStrategyMisconfiguredException, "must either be a GenerationStep"
+        ):
+            GenerationStrategy(
+                nodes=[
+                    GenerationNode(
+                        node_name="node_1",
+                        transition_criteria=node_1_criterion,
+                        model_specs=[sobol_model_spec],
+                    ),
+                    GenerationStep(
+                        model=Models.SOBOL,
+                        num_trials=5,
+                        model_kwargs=self.step_model_kwargs,
+                    ),
+                    GenerationNode(
+                        node_name="node_2",
+                        model_specs=[sobol_model_spec],
+                    ),
+                ],
+            )
+        # check that warning is logged if no nodes have transition arguments
+        with self.assertLogs(GenerationStrategy.__module__, logging.WARNING) as logger:
+            warning_msg = (
+                "None of the nodes in this GenerationStrategy "
+                "contain a `transition_to` argument in their transition_criteria. "
+            )
+            GenerationStrategy(
+                nodes=[
+                    GenerationNode(
+                        node_name="node_1",
+                        model_specs=[sobol_model_spec],
+                    ),
+                    GenerationNode(
+                        node_name="node_3",
+                        model_specs=[sobol_model_spec],
+                    ),
+                ],
+            )
+            self.assertTrue(
+                any(warning_msg in output for output in logger.output),
+                logger.output,
+            )
+
+    def test_gs_with_generation_nodes(self) -> None:
+        "Simple test of a SOBOL + GPEI GenerationStrategy composed of GenerationNodes"
+        sobol_criterion = [
+            MaxTrials(
+                threshold=5,
+                transition_to="GPEI_node",
+                block_gen_if_met=True,
+                only_in_statuses=None,
+                not_in_statuses=[TrialStatus.FAILED, TrialStatus.ABANDONED],
+            )
+        ]
+        gpei_criterion = [
+            MaxTrials(
+                threshold=2,
+                transition_to=None,
+                block_gen_if_met=True,
+                only_in_statuses=None,
+                not_in_statuses=[TrialStatus.FAILED, TrialStatus.ABANDONED],
+            )
+        ]
+        sobol_model_spec = ModelSpec(
+            model_enum=Models.SOBOL,
+            model_kwargs=self.step_model_kwargs,
+            model_gen_kwargs={},
+        )
+        gpei_model_spec = ModelSpec(
+            model_enum=Models.GPEI,
+            model_kwargs=self.step_model_kwargs,
+            model_gen_kwargs={},
+        )
+        sobol_node = GenerationNode(
+            node_name="sobol_node",
+            transition_criteria=sobol_criterion,
+            model_specs=[sobol_model_spec],
+            gen_unlimited_trials=False,
+        )
+        gpei_node = GenerationNode(
+            node_name="GPEI_node",
+            transition_criteria=gpei_criterion,
+            model_specs=[gpei_model_spec],
+            gen_unlimited_trials=False,
+        )
+
+        sobol_GPEI_GS_nodes = GenerationStrategy(
+            name="Sobol+GPEI_Nodes",
+            nodes=[sobol_node, gpei_node],
+        )
+        exp = get_branin_experiment()
+        self.assertEqual(sobol_GPEI_GS_nodes.name, "Sobol+GPEI_Nodes")
+
+        for i in range(7):
+            g = sobol_GPEI_GS_nodes.gen(exp)
+            exp.new_trial(generator_run=g).run()
+            self.assertEqual(len(sobol_GPEI_GS_nodes._generator_runs), i + 1)
+            if i > 4:
+                self.mock_torch_model_bridge.assert_called()
+            else:
+                self.assertEqual(g._model_key, "Sobol")
+                mkw = g._model_kwargs
+                self.assertIsNotNone(mkw)
+                if i > 0:
+                    # Generated points are randomized, so checking that they're there.
+                    self.assertIsNotNone(mkw.get("generated_points"))
+                else:
+                    # This is the first GR, there should be no generated points yet.
+                    self.assertIsNone(mkw.get("generated_points"))
+                # Remove the randomized generated points to compare the rest.
+                mkw = mkw.copy()
+                del mkw["generated_points"]
+                self.assertEqual(
+                    mkw,
+                    {
+                        "seed": None,
+                        "deduplicate": True,
+                        "init_position": i,
+                        "scramble": True,
+                        "fallback_to_sample_polytope": False,
+                    },
+                )
+                self.assertEqual(
+                    g._bridge_kwargs,
+                    {
+                        "optimization_config": None,
+                        "status_quo_features": None,
+                        "status_quo_name": None,
+                        "transform_configs": None,
+                        "transforms": Cont_X_trans,
+                        "fit_out_of_design": False,
+                        "fit_abandoned": False,
+                        "fit_tracking_metrics": True,
+                        "fit_on_init": True,
+                    },
+                )
+                ms = g._model_state_after_gen
+                self.assertIsNotNone(ms)
+                # Generated points are randomized, so just checking that they are there.
+                self.assertIn("generated_points", ms)
+                # Remove the randomized generated points to compare the rest.
+                ms = ms.copy()
+                del ms["generated_points"]
+                self.assertEqual(ms, {"init_position": i + 1})
+
+    def test_step_based_gs_only(self) -> None:
+        """Test the step_based_gs_only decorator"""
+        sobol_model_spec = ModelSpec(
+            model_enum=Models.SOBOL,
+            model_kwargs={},
+            model_gen_kwargs={"n": 2},
+        )
+        gs_test = GenerationStrategy(
+            nodes=[
+                GenerationNode(
+                    node_name="node_1",
+                    model_specs=[sobol_model_spec],
+                ),
+                GenerationNode(
+                    node_name="node_2",
+                    model_specs=[sobol_model_spec],
+                ),
+            ],
+        )
+        with self.assertRaisesRegex(
+            UnsupportedError, "is not supported for GenerationNode based"
+        ):
+            gs_test.current_step_index
 
     # ------------- Testing helpers (put tests above this line) -------------
 

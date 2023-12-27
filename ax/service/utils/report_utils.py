@@ -12,6 +12,7 @@ from logging import Logger
 from typing import (
     Any,
     Callable,
+    cast,
     Dict,
     Iterable,
     List,
@@ -41,6 +42,7 @@ from ax.early_stopping.strategies.base import BaseEarlyStoppingStrategy
 from ax.exceptions.core import DataRequiredError, UserInputError
 from ax.modelbridge import ModelBridge
 from ax.modelbridge.cross_validation import cross_validate
+from ax.modelbridge.generation_strategy import GenerationStrategy
 from ax.modelbridge.random import RandomModelBridge
 from ax.modelbridge.torch import TorchModelBridge
 from ax.plot.contour import interact_contour_plotly
@@ -58,7 +60,7 @@ from ax.plot.scatter import interact_fitted_plotly, plot_multiple_metrics
 from ax.plot.slice import interact_slice_plotly
 from ax.plot.trace import (
     map_data_multiple_metrics_dropdown_plotly,
-    optimization_trace_single_method_plotly,
+    plot_objective_value_vs_trial_index,
 )
 from ax.service.utils.best_point import _derel_opt_config_wrapper, _is_row_feasible
 from ax.service.utils.early_stopping import get_early_stopping_metrics
@@ -83,6 +85,11 @@ CROSS_VALIDATION_CAPTION = (
 )
 FEASIBLE_COL_NAME = "is_feasible"
 BASELINE_ARM_NAME = "baseline_arm"
+UNPREDICTABLE_METRICS_MESSAGE = (
+    "The following metric(s) are behaving unpredictably and may be noisy or "
+    "misconfigured: {}. Please check that they are measuring the intended quantity, "
+    "and are expected to vary reliably as a function of your parameters."
+)
 
 
 def _get_cross_validation_plots(model: ModelBridge) -> List[go.Figure]:
@@ -105,6 +112,11 @@ def _get_objective_trace_plot(
             scatter_plot_with_hypervolume_trace_plotly(experiment=experiment),
             *_pairwise_pareto_plotly_scatter(experiment=experiment),
         ]
+    runner = experiment.runner
+    run_metadata_report_keys = None
+    if runner is not None:
+        run_metadata_report_keys = runner.run_metadata_report_keys
+    exp_df = exp_to_df(exp=experiment, run_metadata_fields=run_metadata_report_keys)
 
     optimization_config = experiment.optimization_config
     if optimization_config is None:
@@ -120,25 +132,14 @@ def _get_objective_trace_plot(
     )
 
     plots = [
-        optimization_trace_single_method_plotly(
-            y=np.array([data.df[data.df["metric_name"] == metric_name]["mean"]]),
-            title=f"Best {metric_name} found vs. # of iterations",
-            ylabel=metric_name,
-            model_transitions=model_transitions,
-            # Try and use the metric's lower_is_better property, but fall back on
-            # objective's minimize property if relevant
-            optimization_direction=(
-                (
-                    "minimize"
-                    if experiment.metrics[metric_name].lower_is_better is True
-                    else "maximize"
-                )
-                if experiment.metrics[metric_name].lower_is_better is not None
-                else (
-                    "minimize" if optimization_config.objective.minimize else "maximize"
-                )
-            ),
-            plot_trial_points=True,
+        plot_objective_value_vs_trial_index(
+            exp_df=exp_df,
+            metric_colname=metric_name,
+            minimize=optimization_config.objective.minimize
+            if optimization_config.objective.metric.name == metric_name
+            else experiment.metrics[metric_name].lower_is_better,
+            title=f"Best {metric_name} found vs. trial index",
+            hover_data_colnames=run_metadata_report_keys,
         )
         for metric_name in metric_names
     ]
@@ -768,7 +769,7 @@ def exp_to_df(
     """
 
     if len(kwargs) > 0:
-        logger.warn(
+        logger.warning(
             "`kwargs` in exp_to_df is deprecated. Please remove extra arguments."
         )
 
@@ -941,6 +942,7 @@ def exp_to_df(
         ["trial_index", "arm_name", "trial_status", "reason", "generation_method"]
         + (run_metadata_fields or [])
         + (trial_properties_fields or [])
+        + ([FEASIBLE_COL_NAME] if FEASIBLE_COL_NAME in exp_df.columns else [])
     )
     for column_name in reversed(initial_column_order):
         if column_name in exp_df.columns:
@@ -1036,6 +1038,18 @@ def _pareto_frontier_scatter_2d_plotly(
         reference_point=reference_point,
         minimize=minimize,
     )
+
+    return pareto_frontier_scatter_2d_plotly(
+        experiment, metric_names, reference_point, minimize
+    )
+
+
+def pareto_frontier_scatter_2d_plotly(
+    experiment: Experiment,
+    metric_names: Tuple[str, str],
+    reference_point: Optional[Tuple[float, float]] = None,
+    minimize: Optional[Union[bool, Tuple[bool, bool]]] = None,
+) -> go.Figure:
 
     df = exp_to_df(experiment)
     Y = df[list(metric_names)].to_numpy()
@@ -1172,8 +1186,8 @@ def _construct_comparison_message(
         )
         return None
 
-    if (objective_minimize and (baseline_value < comparison_value)) or (
-        not objective_minimize and (baseline_value > comparison_value)
+    if (objective_minimize and (baseline_value <= comparison_value)) or (
+        not objective_minimize and (baseline_value >= comparison_value)
     ):
         logger.info(
             f"compare_to_baseline: comparison arm {comparison_arm_name}"
@@ -1200,6 +1214,17 @@ def _build_result_tuple(
     baseline_value: float,
     comparison_row: pd.DataFrame,
 ) -> Tuple[str, bool, str, float, str, float]:
+    """Formats inputs into a tuple for use in creating
+    the comparison message.
+
+    Returns:
+        (metric_name,
+        minimize,
+        baseline_arm_name,
+        baseline_value,
+        comparison_arm_name,
+        comparison_arm_value,)
+    """
     comparison_arm_name = checked_cast(str, comparison_row["arm_name"])
     comparison_value = checked_cast(float, comparison_row[objective_name])
 
@@ -1212,6 +1237,50 @@ def _build_result_tuple(
         comparison_value,
     )
     return result
+
+
+def select_baseline_arm(
+    experiment: Experiment, arms_df: pd.DataFrame, baseline_arm_name: Optional[str]
+) -> Tuple[str, bool]:
+    """
+    Choose a baseline arm that is found in arms_df
+
+    Returns:
+        Tuple:
+            baseline_arm_name if valid baseline exists
+            true when baseline selected from first arm of sweep
+        raise ValueError if no valid baseline found
+    """
+
+    if baseline_arm_name:
+        if arms_df[arms_df["arm_name"] == baseline_arm_name].empty:
+            raise ValueError(
+                f"compare_to_baseline: baseline row: {baseline_arm_name=}"
+                " not found in arms"
+            )
+        return baseline_arm_name, False
+
+    else:
+        if (
+            experiment.status_quo
+            and not arms_df[
+                arms_df["arm_name"] == not_none(experiment.status_quo).name
+            ].empty
+        ):
+            baseline_arm_name = not_none(experiment.status_quo).name
+            return baseline_arm_name, False
+
+        if (
+            experiment.trials
+            and experiment.trials[0].arms
+            and not arms_df[
+                arms_df["arm_name"] == experiment.trials[0].arms[0].name
+            ].empty
+        ):
+            baseline_arm_name = experiment.trials[0].arms[0].name
+            return baseline_arm_name, True
+        else:
+            raise ValueError("compare_to_baseline: could not find valid baseline arm")
 
 
 def maybe_extract_baseline_comparison_values(
@@ -1229,10 +1298,11 @@ def maybe_extract_baseline_comparison_values(
         List of tuples containing:
         (metric_name,
         minimize,
-        comparison_arm_name,
         baseline_arm_name,
         baseline_value,
-        comparison_arm_value)
+        comparison_arm_name,
+        comparison_arm_value,
+        )
     """
     # TODO: incorporate model uncertainty when available
     # TODO: extract and use best arms if comparison_arm_names is not provided.
@@ -1262,19 +1332,15 @@ def maybe_extract_baseline_comparison_values(
         logger.info("compare_to_baseline: comparison_arm_df has no rows.")
         return None
 
-    if baseline_arm_name is None:
-        baseline_arm_name = (
-            BASELINE_ARM_NAME
-            if not experiment.status_quo
-            else not_none(experiment.status_quo).name
+    try:
+        baseline_arm_name, _ = select_baseline_arm(
+            experiment=experiment, arms_df=arms_df, baseline_arm_name=baseline_arm_name
         )
+    except Exception as e:
+        logger.info(f"compare_to_baseline: could not select baseline arm. Reason: {e}")
+        return None
 
     baseline_rows = arms_df[arms_df["arm_name"] == baseline_arm_name]
-    if len(baseline_rows) == 0:
-        logger.info(
-            f"compare_to_baseline: baseline row: {baseline_arm_name=} not found in arms"
-        )
-        return None
 
     if experiment.is_moo_problem:
         multi_objective = checked_cast(MultiObjective, optimization_config.objective)
@@ -1316,24 +1382,13 @@ def maybe_extract_baseline_comparison_values(
     ]
 
 
-def compare_to_baseline(
-    experiment: Experiment,
-    optimization_config: Optional[OptimizationConfig],
-    comparison_arm_names: Optional[List[str]],
-    baseline_arm_name: Optional[str] = None,
+def compare_to_baseline_impl(
+    comparison_list: List[Tuple[str, bool, str, float, str, float]]
 ) -> Optional[str]:
-    """Calculate metric improvement of the experiment against baseline.
-    Returns the message(s) added to markdown_messages"""
-
-    comparison_list = maybe_extract_baseline_comparison_values(
-        experiment=experiment,
-        optimization_config=optimization_config,
-        comparison_arm_names=comparison_arm_names,
-        baseline_arm_name=baseline_arm_name,
-    )
-    if not comparison_list:
-        return None
-    comparison_list = not_none(comparison_list)
+    """Implementation of compare_to_baseline, taking in a
+    list of arm comparisons.
+    Can be used directly with the output of
+    'maybe_extract_baseline_comparison_values'"""
     result_message = ""
     if len(comparison_list) > 1:
         result_message = (
@@ -1346,8 +1401,92 @@ def compare_to_baseline(
         if comparison_message:
             result_message = (
                 result_message
-                + (" * " if len(comparison_list) > 1 else "")
+                + (" \n* " if len(comparison_list) > 1 else "")
                 + not_none(comparison_message)
             )
 
     return result_message if result_message else None
+
+
+def compare_to_baseline(
+    experiment: Experiment,
+    optimization_config: Optional[OptimizationConfig],
+    comparison_arm_names: Optional[List[str]],
+    baseline_arm_name: Optional[str] = None,
+) -> Optional[str]:
+    """Calculate metric improvement of the experiment against baseline.
+    Returns the message(s) added to markdown_messages."""
+
+    comparison_list = maybe_extract_baseline_comparison_values(
+        experiment=experiment,
+        optimization_config=optimization_config,
+        comparison_arm_names=comparison_arm_names,
+        baseline_arm_name=baseline_arm_name,
+    )
+    if not comparison_list:
+        return None
+    comparison_list = not_none(comparison_list)
+    return compare_to_baseline_impl(comparison_list)
+
+
+def warn_if_unpredictable_metrics(
+    experiment: Experiment,
+    generation_strategy: GenerationStrategy,
+    model_fit_threshold: float,
+    metric_names: Optional[List[str]] = None,
+    model_fit_metric_name: str = "coefficient_of_determination",
+) -> Optional[str]:
+    """Warn if any optimization config metrics are considered unpredictable,
+    i.e., their coefficient of determination is less than model_fit_threshold.
+    Args:
+        experiment: The experiment containing the data and optimization_config.
+            If there is no optimization config, this function checks all metrics
+            attached to the experiment.
+        generation_strategy: The generation strategy containing the model.
+        model_fit_threshold: If a model's coefficient of determination is below
+            this threshold, that metric is considered unpredictable.
+        metric_names: If specified, only check these metrics.
+        model_fit_metric_name: Name of the metric to apply the model fit threshold to.
+
+    Returns:
+        A string warning the user about unpredictable metrics, if applicable.
+    """
+    # Get fit quality dict.
+    model_bridge = generation_strategy.model  # Optional[ModelBridge]
+    if model_bridge is None:  # Need to re-fit the model.
+        generation_strategy._fit_current_model(data=None)
+        model_bridge = cast(ModelBridge, generation_strategy.model)
+    if isinstance(model_bridge, RandomModelBridge):
+        logger.info(
+            "Current modelbridge on GenerationStrategy is RandomModelBridge. "
+            "Not checking metric predictability."
+        )
+        return None
+    model_fit_dict = model_bridge.compute_model_fit_metrics(experiment=experiment)
+    fit_quality_dict = model_fit_dict[model_fit_metric_name]
+
+    # Extract salient metrics from experiment.
+    if metric_names is None:
+        if experiment.optimization_config is None:
+            metric_names = list(experiment.metrics.keys())
+        else:
+            metric_names = list(not_none(experiment.optimization_config).metrics.keys())
+    else:
+        # Raise a ValueError if any metric names are invalid.
+        bad_metric_names = set(metric_names) - set(experiment.metrics.keys())
+        if len(bad_metric_names) > 0:
+            raise ValueError(
+                f"Invalid metric names: {bad_metric_names}. Please only use "
+                "metric_names that are available on the present experiment, "
+                f"which are: {list(experiment.metrics.keys())}."
+            )
+
+    # Flag metrics whose coefficient of determination is below the threshold.
+    unpredictable_metrics = {
+        k: v
+        for k, v in fit_quality_dict.items()
+        if k in metric_names and v < model_fit_threshold
+    }
+
+    if len(unpredictable_metrics) > 0:
+        return UNPREDICTABLE_METRICS_MESSAGE.format(list(unpredictable_metrics.keys()))

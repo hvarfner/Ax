@@ -31,6 +31,7 @@ from ax.core.base_trial import BaseTrial, TrialStatus
 from ax.core.batch_trial import AbandonedArm, BatchTrial
 from ax.core.data import Data
 from ax.core.experiment import DataType, Experiment
+from ax.core.generation_strategy_interface import GenerationStrategyInterface
 from ax.core.generator_run import GeneratorRun
 from ax.core.map_data import MapData, MapKeyInfo
 from ax.core.map_metric import MapMetric
@@ -254,7 +255,7 @@ def get_branin_experiment_with_status_quo_trials(
         t.run().mark_completed()
     status_quo_features = ObservationFeatures(
         parameters=exp.trials[0].status_quo.parameters,  # pyre-fixme [16]
-        trial_index=0,  # pyre-ignore [6] See T163830566
+        trial_index=0,
     )
     return exp, status_quo_features
 
@@ -611,13 +612,36 @@ def get_experiment_with_scalarized_objective_and_outcome_constraint() -> Experim
     )
 
 
-def get_hierarchical_search_space_experiment() -> Experiment:
-    return Experiment(
+def get_hierarchical_search_space_experiment(
+    num_observations: int = 0,
+) -> Experiment:
+    experiment = Experiment(
         name="test_experiment_hss",
         description="test experiment with hierarchical search space",
         search_space=get_hierarchical_search_space(),
         optimization_config=get_optimization_config(),
     )
+    sobol_generator = get_sobol(search_space=experiment.search_space)
+    for i in range(num_observations):
+        trial = experiment.new_trial(generator_run=sobol_generator.gen(1))
+        trial.mark_running(no_runner_required=True)
+        data = Data(
+            df=pd.DataFrame.from_records(
+                [
+                    {
+                        "arm_name": f"{i}_0",
+                        "metric_name": f"m{j + 1}",
+                        "mean": o,
+                        "sem": None,
+                        "trial_index": i,
+                    }
+                    for j, o in enumerate(torch.rand(2).tolist())
+                ]
+            )
+        )
+        experiment.attach_data(data)
+        trial.mark_completed()
+    return experiment
 
 
 def get_experiment_with_observations(
@@ -626,6 +650,7 @@ def get_experiment_with_observations(
     scalarized: bool = False,
     constrained: bool = False,
     with_tracking_metrics: bool = False,
+    search_space: Optional[SearchSpace] = None,
 ) -> Experiment:
     multi_objective = (len(observations[0]) - constrained) > 1
     if multi_objective:
@@ -680,8 +705,9 @@ def get_experiment_with_observations(
             )
         else:
             optimization_config = OptimizationConfig(objective=objective)
+    search_space = search_space or get_search_space_for_range_values(min=0.0, max=1.0)
     exp = Experiment(
-        search_space=get_search_space_for_range_values(min=0.0, max=1.0),
+        search_space=search_space,
         optimization_config=optimization_config,
         tracking_metrics=[
             Metric(name=f"m{len(observations[0])}", lower_is_better=False)
@@ -691,10 +717,10 @@ def get_experiment_with_observations(
         runner=SyntheticRunner(),
         is_test=True,
     )
+    sobol_generator = get_sobol(search_space=search_space)
     for i, obs in enumerate(observations):
         # Create a dummy trial to add the observation.
-        trial = exp.new_trial()
-        trial.add_arm(Arm({"x": i / 100.0, "y": i / 100.0}))
+        trial = exp.new_trial(generator_run=sobol_generator.gen(n=1))
         data = Data(
             df=pd.DataFrame.from_records(
                 [
@@ -1466,6 +1492,16 @@ def get_multi_objective() -> Objective:
     )
 
 
+def get_many_branin_objective_opt_config(
+    n_objectives: int,
+) -> MultiObjectiveOptimizationConfig:
+    return MultiObjectiveOptimizationConfig(
+        objective=MultiObjective(
+            objectives=[get_branin_objective(name=f"m{i}") for i in range(n_objectives)]
+        )
+    )
+
+
 def get_scalarized_objective() -> Objective:
     return ScalarizedObjective(
         metrics=[Metric(name="m1"), Metric(name="m3")],
@@ -1474,8 +1510,8 @@ def get_scalarized_objective() -> Objective:
     )
 
 
-def get_branin_objective(minimize: bool = False) -> Objective:
-    return Objective(metric=get_branin_metric(), minimize=minimize)
+def get_branin_objective(name: str = "branin", minimize: bool = False) -> Objective:
+    return Objective(metric=get_branin_metric(name=name), minimize=minimize)
 
 
 def get_branin_multi_objective(num_objectives: int = 2) -> Objective:
@@ -2207,3 +2243,22 @@ class CustomTestMetric(Metric):
     def __init__(self, name: str, test_attribute: str) -> None:
         self.test_attribute = test_attribute
         super().__init__(name=name)
+
+
+class SpecialGenerationStrategy(GenerationStrategyInterface):
+    """A subclass of `GenerationStrategyInterface` to be used
+    for testing how methods respond to subtypes other than
+    `GenerationStrategy`."""
+
+    def __init__(self) -> None:
+        self._name = "special"
+        self._generator_runs: List[GeneratorRun] = []
+
+    def gen_for_multiple_trials_with_multiple_models(
+        self,
+        experiment: Experiment,
+        num_generator_runs: int,
+        data: Optional[Data] = None,
+        n: int = 1,
+    ) -> List[List[GeneratorRun]]:
+        return []

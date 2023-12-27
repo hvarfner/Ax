@@ -27,12 +27,13 @@ from ax.modelbridge.cross_validation import (
     CVResult,
 )
 from ax.modelbridge.registry import ModelRegistryBase
-from ax.utils.common.base import Base
+from ax.utils.common.base import SortableBase
 from ax.utils.common.kwargs import (
     consolidate_kwargs,
     filter_kwargs,
     get_function_argument_names,
 )
+from ax.utils.common.serialization import SerializationMixin
 from ax.utils.common.typeutils import not_none
 
 
@@ -48,7 +49,7 @@ class ModelSpecJSONEncoder(json.JSONEncoder):
 
 
 @dataclass
-class ModelSpec(Base):
+class ModelSpec(SortableBase, SerializationMixin):
     model_enum: ModelRegistryBase
     # Kwargs to pass into the `Model` + `ModelBridge` constructors in
     # `ModelRegistryBase.__call__`.
@@ -287,6 +288,12 @@ class ModelSpec(Base):
 
     def __eq__(self, other: ModelSpec) -> bool:
         return repr(self) == repr(other)
+
+    @property
+    def _unique_id(self) -> str:
+        """Returns the unique ID of this model spec"""
+        # TODO @mgarrard verify that this is unique enough
+        return str(hash(self))
 
 
 @dataclass

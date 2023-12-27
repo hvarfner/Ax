@@ -29,11 +29,11 @@ from typing import (
 import ax.service.utils.early_stopping as early_stopping_utils
 from ax.core.base_trial import BaseTrial, TrialStatus
 from ax.core.experiment import Experiment
+from ax.core.generation_strategy_interface import GenerationStrategyInterface
 from ax.core.generator_run import GeneratorRun
 from ax.core.map_data import MapData
 from ax.core.map_metric import MapMetric
 from ax.core.metric import Metric, MetricFetchE, MetricFetchResult
-from ax.core.observation import ObservationFeatures
 from ax.core.optimization_config import (
     MultiObjectiveOptimizationConfig,
     OptimizationConfig,
@@ -41,7 +41,6 @@ from ax.core.optimization_config import (
 from ax.core.outcome_constraint import ObjectiveThreshold
 from ax.core.runner import Runner
 from ax.core.types import TModelPredictArm, TParameterization
-from ax.core.utils import get_pending_observation_features_based_on_trial_status
 
 from ax.early_stopping.utils import estimate_early_stopping_savings
 from ax.exceptions.core import (
@@ -72,13 +71,13 @@ from ax.utils.common.typeutils import not_none
 from pyre_extensions import assert_is_instance
 
 
-NOT_IMPLEMENTED_IN_BASE_CLASS_MSG = """
-This method is not implemented in the base `Scheduler` class.
-If this functionality is desired, specify the method in the
+NOT_IMPLEMENTED_IN_BASE_CLASS_MSG = """ \
+This method is not implemented in the base `Scheduler` class. \
+If this functionality is desired, specify the method in the \
 scheduler subclass.
 """
 GS_TYPE_MSG = "This optimization run uses a '{gs_name}' generation strategy."
-OPTIMIZATION_COMPLETION_MSG = """Optimization completed with total of {num_trials}
+OPTIMIZATION_COMPLETION_MSG = """Optimization completed with total of {num_trials} \
 trials attached to the underlying Ax experiment '{experiment_name}'.
 """
 FAILURE_EXCEEDED_MSG = (
@@ -161,7 +160,7 @@ class Scheduler(WithDBSettingsBase, BestPointMixin):
     """
 
     experiment: Experiment
-    generation_strategy: GenerationStrategy
+    generation_strategy: GenerationStrategyInterface
     options: SchedulerOptions
     logger: LoggerAdapter
     # Mapping of form {short string identifier -> message to show in reported
@@ -205,7 +204,7 @@ class Scheduler(WithDBSettingsBase, BestPointMixin):
     def __init__(
         self,
         experiment: Experiment,
-        generation_strategy: GenerationStrategy,
+        generation_strategy: GenerationStrategyInterface,
         options: SchedulerOptions,
         db_settings: Optional[DBSettings] = None,
         _skip_experiment_save: bool = False,
@@ -220,7 +219,7 @@ class Scheduler(WithDBSettingsBase, BestPointMixin):
 
         if not isinstance(experiment, Experiment):
             raise TypeError("{experiment} is not an Ax experiment.")
-        if not isinstance(generation_strategy, GenerationStrategy):
+        if not isinstance(generation_strategy, GenerationStrategyInterface):
             raise TypeError("{generation_strategy} is not a generation strategy.")
         self._validate_options(options=options)
 
@@ -381,6 +380,21 @@ class Scheduler(WithDBSettingsBase, BestPointMixin):
         """
         return not_none(self.experiment.runner)
 
+    @property
+    def standard_generation_strategy(self) -> GenerationStrategy:
+        """Used for operations in the scheduler that can only be done with
+        and instance of ``GenerationStrategy``.
+        """
+        gs = self.generation_strategy
+        if not isinstance(gs, GenerationStrategy):
+            raise NotImplementedError(
+                "This functionality is only supported with instances of "
+                "`GenerationStrategy` (one that uses `GenerationStrategy` "
+                "class) and not yet with other types of "
+                "`GenerationStrategyInterface`."
+            )
+        return gs
+
     def __repr__(self) -> str:
         """Short user-friendly string representation."""
         if not hasattr(self, "experiment"):
@@ -446,7 +460,7 @@ class Scheduler(WithDBSettingsBase, BestPointMixin):
     ) -> Optional[Tuple[int, TParameterization, Optional[TModelPredictArm]]]:
         return self._get_best_trial(
             experiment=self.experiment,
-            generation_strategy=self.generation_strategy,
+            generation_strategy=self.standard_generation_strategy,
             optimization_config=optimization_config,
             trial_indices=trial_indices,
             use_model_predictions=use_model_predictions,
@@ -461,7 +475,7 @@ class Scheduler(WithDBSettingsBase, BestPointMixin):
     ) -> Optional[Dict[int, Tuple[TParameterization, TModelPredictArm]]]:
         return self._get_pareto_optimal_parameters(
             experiment=self.experiment,
-            generation_strategy=self.generation_strategy,
+            generation_strategy=self.standard_generation_strategy,
             optimization_config=optimization_config,
             trial_indices=trial_indices,
             use_model_predictions=use_model_predictions,
@@ -476,7 +490,7 @@ class Scheduler(WithDBSettingsBase, BestPointMixin):
     ) -> float:
         return BestPointMixin._get_hypervolume(
             experiment=self.experiment,
-            generation_strategy=self.generation_strategy,
+            generation_strategy=self.standard_generation_strategy,
             optimization_config=optimization_config,
             trial_indices=trial_indices,
             use_model_predictions=use_model_predictions,
@@ -528,6 +542,71 @@ class Scheduler(WithDBSettingsBase, BestPointMixin):
         were the metric values, what were encountered failures, etc.
         """
         return OptimizationResult()
+
+    def get_improvement_over_baseline(
+        self,
+        baseline_arm_name: Optional[str] = None,
+    ) -> float:
+        """Returns the scalarized improvement over baseline, if applicable.
+
+        Returns:
+            For Single Objective cases, returns % improvement of objective.
+            Positive indicates improvement over baseline. Negative indicates regression.
+            For Multi Objective cases, throws NotImplementedError
+        """
+        if self.experiment.is_moo_problem:
+            raise NotImplementedError(
+                "`get_improvement_over_baseline` not yet implemented"
+                + " for multi-objective problems."
+            )
+        if not baseline_arm_name:
+            raise UserInputError(
+                "`get_improvement_over_baseline` missing required parameter: "
+                + f"{baseline_arm_name=}, "
+            )
+
+        optimization_config = self.experiment.optimization_config
+        if not optimization_config:
+            raise ValueError("No optimization config found.")
+
+        objective_metric_name = optimization_config.objective.metric.name
+
+        # get the baseline trial
+        data = self.experiment.lookup_data().df
+        data = data[data["arm_name"] == baseline_arm_name]
+        if len(data) == 0:
+            raise UserInputError(
+                "`get_improvement_over_baseline`"
+                " could not find baseline arm"
+                f" `{baseline_arm_name}` in the experiment data."
+            )
+        data = data[data["metric_name"] == objective_metric_name]
+        baseline_value = data.iloc[0]["mean"]
+
+        # Find objective value of the best trial
+        idx, param, best_arm = not_none(
+            self.get_best_trial(
+                optimization_config=optimization_config, use_model_predictions=False
+            )
+        )
+        best_arm = not_none(best_arm)
+        best_obj_value = best_arm[0][objective_metric_name]
+
+        def percent_change(x: float, y: float, minimize: bool) -> float:
+            if x == 0:
+                raise ZeroDivisionError(
+                    "Cannot compute percent improvement when denom is zero"
+                )
+            percent_change = (y - x) / abs(x) * 100
+            if minimize:
+                percent_change = -percent_change
+            return percent_change
+
+        return percent_change(
+            x=baseline_value,
+            y=best_obj_value,
+            minimize=optimization_config.objective.minimize,
+        )
 
     # ---------- Methods below should generally not be modified in subclasses. ---------
 
@@ -648,7 +727,7 @@ class Scheduler(WithDBSettingsBase, BestPointMixin):
             self.options.init_seconds_between_polls is not None
             and self.options.early_stopping_strategy is not None
         ):
-            self.logger.warn(
+            self.logger.warning(
                 "Both `init_seconds_between_polls` and `early_stopping_strategy "
                 "supplied. `init_seconds_between_polls="
                 f"{self.options.init_seconds_between_polls}` will be overrridden by "
@@ -775,7 +854,7 @@ class Scheduler(WithDBSettingsBase, BestPointMixin):
 
         if failure_rate_exceeded:
             if self._num_trials_bad_due_to_err > num_bad_in_scheduler / 2:
-                self.logger.warn(
+                self.logger.warning(
                     "MetricFetchE INFO: Sweep aborted due to an exceeded error rate, "
                     "which was primarily caused by failure to fetch metrics. Please "
                     "check if anything could cause your metrics to be flaky or "
@@ -1182,7 +1261,11 @@ class Scheduler(WithDBSettingsBase, BestPointMixin):
                 trial_indices=running_trial_indices,
                 overwrite_existing_data=True,
             )
-            updated_any_trial = len(results) > 0
+            updated_any_trial = any(
+                r.is_ok()
+                for results_by_metric_name in results.values()
+                for r in results_by_metric_name.values()
+            )
 
         # 3. Determine which trials to stop early
         stop_trial_info = self.should_stop_trials_early(
@@ -1233,14 +1316,13 @@ class Scheduler(WithDBSettingsBase, BestPointMixin):
 
             updated_trials.extend(trials)
 
-        if not updated_any_trial:  # Did not update anything, nothing to save.
-            return False
+        if updated_any_trial:  # Only save if there were updates.
+            self.logger.debug(f"Updating {len(updated_trials)} trials in DB.")
+            self._save_or_update_trials_in_db_if_possible(
+                experiment=self.experiment,
+                trials=updated_trials,
+            )
 
-        self.logger.debug(f"Updating {len(updated_trials)} trials in DB.")
-        self._save_or_update_trials_in_db_if_possible(
-            experiment=self.experiment,
-            trials=updated_trials,
-        )
         return updated_any_trial
 
     def _process_completed_trials(self, newly_completed: Set[int]) -> None:
@@ -1449,12 +1531,9 @@ class Scheduler(WithDBSettingsBase, BestPointMixin):
         Returns:
             List of trials, empty if generation is not possible.
         """
-        pending = get_pending_observation_features_based_on_trial_status(
-            experiment=self.experiment
-        )
         try:
             generator_runs = self._gen_new_trials_from_generation_strategy(
-                num_trials=num_trials, n=n, pending=pending
+                num_trials=num_trials, n=n
             )
         except OptimizationComplete as err:
             completion_str = f"Optimization complete: {err}"
@@ -1483,9 +1562,9 @@ class Scheduler(WithDBSettingsBase, BestPointMixin):
             self.logger.debug(f"Message from generation strategy: {err}")
             return []
 
-        if (
-            self.options.trial_type == TrialType.TRIAL
-            and len(generator_runs[0].arms) > 1
+        if self.options.trial_type == TrialType.TRIAL and any(
+            len(generator_run_list[0].arms) > 1 or len(generator_run_list) > 1
+            for generator_run_list in generator_runs
         ):
             raise SchedulerInternalError(
                 "Generation strategy produced multiple arms when only one was expected."
@@ -1493,32 +1572,30 @@ class Scheduler(WithDBSettingsBase, BestPointMixin):
 
         return [
             self.experiment.new_batch_trial(
-                generator_run=generator_run,
+                generator_runs=generator_run_list,
                 ttl_seconds=self.options.ttl_seconds_for_trials,
             )
             if self.options.trial_type == TrialType.BATCH_TRIAL
             else self.experiment.new_trial(
-                generator_run=generator_run,
+                generator_run=generator_run_list[0],
                 ttl_seconds=self.options.ttl_seconds_for_trials,
             )
-            for generator_run in generator_runs
+            for generator_run_list in generator_runs
         ]
 
     def _gen_new_trials_from_generation_strategy(
         self,
         num_trials: int,
         n: int,
-        pending: Optional[Dict[str, List[ObservationFeatures]]],
-    ) -> List[GeneratorRun]:
+    ) -> List[List[GeneratorRun]]:
         """Generates a list ``GeneratorRun``s of length of ``num_trials`` using the
         ``_gen_multiple`` method of the scheduler's ``generation_strategy``, taking
         into account any ``pending`` observations.
         """
-        return self.generation_strategy._gen_multiple(
+        return self.generation_strategy.gen_for_multiple_trials_with_multiple_models(
             experiment=self.experiment,
             num_generator_runs=num_trials,
             n=n,
-            pending_observations=pending,
         )
 
     def _update_and_save_trials(
@@ -1557,7 +1634,7 @@ class Scheduler(WithDBSettingsBase, BestPointMixin):
                 try:
                     trial.mark_running(no_runner_required=True)
                 except ValueError as e:
-                    self.logger.warn(
+                    self.logger.warning(
                         "Unable to mark trial as RUNNING due to the following error:\n"
                         + str(e)
                     )
@@ -1853,10 +1930,9 @@ def get_fitted_model_bridge(scheduler: Scheduler) -> ModelBridge:
     Returns:
         A ModelBridge object fitted to the observations of the scheduler's experiment.
     """
-    gs = scheduler.generation_strategy  # GenerationStrategy
+    gs = scheduler.standard_generation_strategy
     model_bridge = gs.model  # Optional[ModelBridge]
     if model_bridge is None:  # Need to re-fit the model.
-        data = scheduler.experiment.fetch_data()
-        gs._fit_current_model(data=data)
+        gs._fit_current_model(data=None)  # Will lookup_data if it none is provided.
         model_bridge = cast(ModelBridge, gs.model)
     return model_bridge

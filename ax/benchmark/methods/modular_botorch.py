@@ -41,8 +41,8 @@ acqf_name_abbreviations: Dict[str, str] = {
 def get_sobol_botorch_modular_acquisition(
     model_cls: Type[Model],
     acquisition_cls: Type[AcquisitionFunction],
+    distribute_replications: bool,
     scheduler_options: Optional[SchedulerOptions] = None,
-    distribute_replications: bool = False,
     name: Optional[str] = None,
 ) -> BenchmarkMethod:
     model_kwargs: Dict[
@@ -65,7 +65,6 @@ def get_sobol_botorch_modular_acquisition(
             GenerationStep(
                 model=Models.BOTORCH_MODULAR,
                 num_trials=-1,
-                max_parallelism=1,
                 model_kwargs=model_kwargs,
             ),
         ],

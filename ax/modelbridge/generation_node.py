@@ -6,8 +6,6 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
-
 from dataclasses import dataclass, field
 from logging import Logger
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
@@ -23,12 +21,9 @@ from ax.core.generator_run import GeneratorRun
 from ax.core.observation import ObservationFeatures
 from ax.core.optimization_config import OptimizationConfig
 from ax.core.search_space import SearchSpace
-from ax.exceptions.core import DataRequiredError, UserInputError
+from ax.exceptions.core import UserInputError
 
-from ax.exceptions.generation_strategy import (
-    GenerationStrategyRepeatedPoints,
-    MaxParallelismReachedException,
-)
+from ax.exceptions.generation_strategy import GenerationStrategyRepeatedPoints
 from ax.modelbridge.base import ModelBridge
 from ax.modelbridge.cross_validation import BestModelSelector, CVDiagnostics, CVResult
 from ax.modelbridge.model_spec import FactoryFunctionModelSpec, ModelSpec
@@ -42,16 +37,17 @@ from ax.modelbridge.transition_criterion import (
 )
 from ax.utils.common.base import Base, SortableBase
 from ax.utils.common.logger import get_logger
+from ax.utils.common.serialization import SerializationMixin
 from ax.utils.common.typeutils import not_none
 
 
 logger: Logger = get_logger(__name__)
 
 TModelFactory = Callable[..., ModelBridge]
-CANNOT_SELECT_ONE_MODEL_MSG = """
-Base `GenerationNode` does not implement selection among fitted
-models, so exactly one `ModelSpec` must be specified when using
-`GenerationNode._pick_fitted_model_to_gen_from` (usually called
+CANNOT_SELECT_ONE_MODEL_MSG = """\
+Base `GenerationNode` does not implement selection among fitted \
+models, so exactly one `ModelSpec` must be specified when using \
+`GenerationNode._pick_fitted_model_to_gen_from` (usually called \
 by `GenerationNode.gen`.
 """
 MAX_GEN_DRAWS = 5
@@ -62,7 +58,7 @@ MAX_GEN_DRAWS_EXCEEDED_MESSAGE = (
 )
 
 
-class GenerationNode:
+class GenerationNode(SerializationMixin, SortableBase):
     """Base class for GenerationNode, capable of fitting one or more model specs under
     the hood and generating candidates from them.
 
@@ -100,6 +96,7 @@ class GenerationNode:
 
     # Optional specifications
     _model_spec_to_gen_from: Optional[ModelSpec] = None
+    # TODO: @mgarrard should this be a dict criterion_class name -> criterion mapping?
     _transition_criteria: Optional[Sequence[TransitionCriterion]]
 
     # [TODO] Handle experiment passing more eloquently by enforcing experiment
@@ -230,6 +227,20 @@ class GenerationNode:
         the next node.
         """
         return self.should_transition_to_next_node(raise_data_required_error=False)[0]
+
+    @property
+    def _unique_id(self) -> str:
+        """Returns a unique id for this GenerationNode"""
+        return self.node_name
+
+    @property
+    def _fitted_model(self) -> Optional[ModelBridge]:
+        """Private property to return optional fitted_model from
+        self.model_spec_to_gen_from for convenience. If no model is fit,
+        will return None. If using the non-private `fitted_model` property,
+        and no model is fit, a UserInput error will be raised.
+        """
+        return self.model_spec_to_gen_from._fitted_model
 
     def fit(
         self,
@@ -535,13 +546,16 @@ class GenerationNode:
     def __repr__(self) -> str:
         "String representation of this GenerationNode"
         # add model specs
-        repr = f"{self.__class__.__name__}(model_specs="
+        str_rep = f"{self.__class__.__name__}(model_specs="
         model_spec_str = str(self.model_specs).replace("\n", " ").replace("\t", "")
-        repr += model_spec_str
+        str_rep += model_spec_str
 
-        # add node name
-        repr += f", node_name={self.node_name}"
-        return f"{repr})"
+        # add node name, gen_unlimited_trials, and transition_criteria
+        str_rep += f", node_name={self.node_name}"
+        str_rep += f", gen_unlimited_trials={str(self.gen_unlimited_trials)}"
+        str_rep += f", transition_criteria={str(self.transition_criteria)}"
+
+        return f"{str_rep})"
 
 
 @dataclass
@@ -766,219 +780,3 @@ class GenerationStep(GenerationNode, SortableBase):
         # as we compare equality of other Ax objects (and we want all the
         # same special-casing to apply).
         return SortableBase.__eq__(self, other=other)
-
-    # ------------------------- Trial logic helpers. -------------------------
-
-    @property
-    def trial_indices(self) -> Dict[int, Set[int]]:
-        """A mapping from generation step index to the trials of the experiment
-        associated with that GenerationStep. NOTE: This maps all generation steps
-        up to and including the current generation step.
-        """
-        trial_indices_by_step = defaultdict(set)
-
-        for trial_index, trial in self.experiment.trials.items():
-            if (
-                trial._generation_step_index is not None
-                and trial._generation_step_index <= self.index
-            ):
-                trial_indices_by_step[trial._generation_step_index].add(trial_index)
-
-        return trial_indices_by_step
-
-    @property
-    def num_can_complete(self) -> int:
-        """Number of trials in generation strategy that can
-        be completed (so are not in status `FAILED` or `ABANDONED`). Used to keep
-        track of how many generator runs (that become trials) can be produced
-        from this generation step.
-
-        NOTE: This includes `COMPLETED` trials.
-        """
-        step_trials = self.trial_indices[self.index]
-        by_status = self.experiment.trial_indices_by_status
-
-        # Number of trials that will not be `COMPLETED`, used to avoid counting
-        # unsuccessfully terminated trials against the number of generated trials
-        # during determination of whether enough trials have been generated and
-        # completed to proceed to the next generation step.
-        num_will_not_complete = len(
-            step_trials.intersection(
-                by_status[TrialStatus.FAILED].union(by_status[TrialStatus.ABANDONED])
-            )
-        )
-        return len(step_trials) - num_will_not_complete
-
-    @property
-    def _num_completed(self) -> int:
-        """Number of trials in status `COMPLETED` or `EARLY_STOPPED` for
-        this generation step of this strategy. We include early
-        stopped trials because their data will be used in the model,
-        so they are completed from the model's point of view and should
-        count towards that total.
-        """
-        step_trials = self.trial_indices[self.index]
-        by_status = self.experiment.trial_indices_by_status
-
-        return len(
-            step_trials.intersection(
-                by_status[TrialStatus.COMPLETED].union(
-                    by_status[TrialStatus.EARLY_STOPPED]
-                )
-            )
-        )
-
-    def num_trials_to_gen_and_complete(
-        self,
-    ) -> Tuple[int, int]:
-        """Returns how many generator runs (to be made into a trial each) are left to
-        generate in this step and how many are left to be completed in it before
-        the generation strategy can move to the next step.
-
-        NOTE: returns (-1, -1) if the number of trials to be generated from the given
-        step is unlimited (and therefore it must be the last generation step).
-        """
-        if self.num_trials == -1:
-            return -1, -1
-
-        # More than `num_trials` can be generated (if not `enforce_num_trials=False`)
-        # and more than `min_trials_observed` can be completed (if `min_trials_observed
-        # < `num_trials`), so `left_to_gen` and `left_to_complete` should be clamped
-        # to lower bound of 0.
-        left_to_gen = max(self.num_trials - self.num_can_complete, 0)
-        left_to_complete = max(self.min_trials_observed - self._num_completed, 0)
-        return left_to_gen, left_to_complete
-
-    def num_remaining_trials_until_max_parallelism(
-        self, raise_max_parallelism_reached_exception: bool = True
-    ) -> Optional[int]:
-        """Returns how many generator runs (to be made into a trial each) are left to
-        generate before the `max_parallelism` limit is reached for this generation step.
-
-        Args:
-            raise_max_parallelism_reached_exception: Whether to raise
-                ``MaxParallelismReachedException`` if number of trials running in
-                this generation step exceeds maximum parallelism for it.
-        """
-        max_parallelism = self.max_parallelism
-        num_running = self.num_running_trials
-
-        if max_parallelism is None:
-            return None  # There was no `max_parallelism` limit.
-
-        if raise_max_parallelism_reached_exception and num_running >= max_parallelism:
-            raise MaxParallelismReachedException(
-                step_index=self.index,
-                model_name=self.model_name,
-                num_running=num_running,
-            )
-
-        return max_parallelism - num_running
-
-    @property
-    def num_running_trials(self) -> int:
-        """Number of trials in status `RUNNING` for this generation step of this
-        strategy.
-        """
-        num_running = 0
-        for trial in self.experiment.trials.values():
-            if trial._generation_step_index == self.index and trial.status.is_running:
-                num_running += 1
-        return num_running
-
-    def is_step_completed(self, raise_data_required_error: bool = True) -> bool:
-        """Determines if a generation step is completed if the conditions are met.
-
-        Conditions for marking the step completed:
-        1. ``num_trials`` in this generation step have been generated (generation
-            strategy produced that many generator runs, which were then attached to
-            trials),
-        2. ``min_trials_observed`` in this generation step have been completed,
-
-        NOTE: this method raises ``DataRequiredError`` if all conditions below are true:
-        1. ``raise_data_required_error`` argument is ``True``,
-        2. ``num_trials`` in current generation step have been generated,
-        3. ``min_trials_observed`` in current generation step have not been completed,
-        4. ``enforce_num_trials`` in current generation step is ``True``.
-
-        Args:
-            raise_data_required_error: Whether to raise ``DataRequiredError`` in the
-                case detailed above. Not raising the error is useful if just looking to
-                check how many generator runs (to be made into trials) can be produced,
-                but not actually producing them yet.
-
-        Returns:
-            Whether this generation step is completed.
-        """
-        to_gen, to_complete = self.num_trials_to_gen_and_complete()
-        # Unlimited trials, check completion_criteria, if no completion_criteria
-        # always return false to allow for unlimited trials
-        if to_gen == to_complete == -1:
-            if len(self.completion_criteria) > 0:
-                # TODO: @mgarrard remove check when legacy usecase is updated
-                criterion_names = [
-                    str(criterion) for criterion in self.completion_criteria
-                ]
-                if "AEPsych" in str(self) or any(
-                    "MinimumPreferenceOccurances" in name for name in criterion_names
-                ):
-                    return all(
-                        criterion.is_met(experiment=self.experiment)
-                        for criterion in self.completion_criteria
-                    )
-                # TODO: @mgarrard to enable use of completion criteria for
-                # checking if this step is completed
-            return False
-
-        enforcing_num_trials = self.enforce_num_trials
-        trials_left_to_gen = to_gen > 0
-        trials_left_to_complete = to_complete > 0
-
-        # If there is something left to gen or complete, we don't move to next step.
-        if trials_left_to_gen or trials_left_to_complete:
-            # Check that minimum observed_trials is satisfied if it's enforced.
-            raise_error = raise_data_required_error
-            if raise_error and enforcing_num_trials and not trials_left_to_gen:
-                raise DataRequiredError(
-                    "All trials for current model have been generated, but not enough "
-                    "data has been observed to fit next model. Try again when more data"
-                    " are available."
-                )
-            return False
-        return True
-
-    # ------------------------- Generation run logic helpers. -------------------------
-
-    def get_generator_run_limit(
-        self,
-    ) -> int:
-        """How many generator runs can this generation strategy generate right now,
-        assuming each one of them becomes its own trial, and whether optimization
-        is completed.
-
-        Returns:
-              - the number of generator runs that can currently be produced, with -1
-                meaning unlimited generator runs,
-        """
-        to_gen = self.num_trials_to_gen_and_complete()[0]
-        assert to_gen >= -1, (
-            "Number of trials left to generate in current generation step is "
-            f"{to_gen}. This is an unexpected state of the generation strategy."
-        )
-        until_max_parallelism = self.num_remaining_trials_until_max_parallelism(
-            raise_max_parallelism_reached_exception=False
-        )
-
-        # If there is no limitation on the number of trials in the step and
-        # there is a parallelism limit, return number of trials until that limit.
-        if until_max_parallelism is not None and to_gen == -1:
-            return until_max_parallelism
-
-        # If there is a limitation on the number of trials in the step and also on
-        # parallelism, return the number of trials until either one of the limits.
-        if until_max_parallelism is not None:  # NOTE: to_gen must be >= 0 here
-            return min(to_gen, until_max_parallelism)
-
-        # If there is no limit on parallelism, return how many trials are left to
-        # gen in this step (might be -1 indicating unlimited).
-        return to_gen
