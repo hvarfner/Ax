@@ -46,7 +46,7 @@ from botorch.acquisition.multi_objective.monte_carlo import (
     qNoisyExpectedHypervolumeImprovement,
 )
 from botorch.acquisition.joint_entropy_search import qJointEntropySearch
-from botorch.acquisition.scorebo import SelfCorrectingBayesianOptimization
+from botorch.acquisition.scorebo import qSelfCorrectingBayesianOptimization
 from botorch.models import SaasFullyBayesianSingleTaskGP
 from botorch.models.fully_bayesian_multitask import SaasFullyBayesianMultiTaskGP
 
@@ -140,7 +140,7 @@ ACQUISITION_FUNCTION_REGISTRY: Dict[Type[AcquisitionFunction], str] = {
     qLogNoisyExpectedHypervolumeImprovement: "qLogNoisyExpectedHypervolumeImprovement",
     # info-theoretic acquisition functions
     qJointEntropySearch: "qJointEntropySearch",
-    SelfCorrectingBayesianOptimization: "SelfCorrectingBayesianOptimization",
+    qSelfCorrectingBayesianOptimization: "SelfCorrectingBayesianOptimization",
 }
 
 
