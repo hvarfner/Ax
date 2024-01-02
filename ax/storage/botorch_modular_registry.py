@@ -21,6 +21,11 @@ from botorch.acquisition.analytic import (
     LogNoisyExpectedImprovement,
     NoisyExpectedImprovement,
 )
+from botorch.acquisition.bayesian_active_learning import (
+    qBayesianActiveLearningByDisagreement,
+    qBayesianQueryByComittee,
+    qStatisticalDistanceActiveLearning
+)
 from botorch.acquisition.knowledge_gradient import (
     qKnowledgeGradient,
     qMultiFidelityKnowledgeGradient,
@@ -140,7 +145,10 @@ ACQUISITION_FUNCTION_REGISTRY: Dict[Type[AcquisitionFunction], str] = {
     qLogNoisyExpectedHypervolumeImprovement: "qLogNoisyExpectedHypervolumeImprovement",
     # info-theoretic acquisition functions
     qJointEntropySearch: "qJointEntropySearch",
-    qSelfCorrectingBayesianOptimization: "SelfCorrectingBayesianOptimization",
+    qSelfCorrectingBayesianOptimization: "qSelfCorrectingBayesianOptimization",
+    qBayesianActiveLearningByDisagreement: "qBayesianActiveLearningByDisagreement",
+    qBayesianQueryByComittee: "qBayesianQueryByComittee",
+    qStatisticalDistanceActiveLearning: "qStatisticalDistanceActiveLearning",
 }
 
 
