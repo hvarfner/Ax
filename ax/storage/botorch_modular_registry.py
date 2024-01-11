@@ -26,6 +26,9 @@ from botorch.acquisition.bayesian_active_learning import (
     qBayesianQueryByComittee,
     qStatisticalDistanceActiveLearning
 )
+from botorch.acquisition.diversity import (
+    qDistanceWeightedImprovementOverThreshold,
+)
 from botorch.acquisition.knowledge_gradient import (
     qKnowledgeGradient,
     qMultiFidelityKnowledgeGradient,
@@ -144,6 +147,7 @@ ACQUISITION_FUNCTION_REGISTRY: Dict[Type[AcquisitionFunction], str] = {
     qLogExpectedHypervolumeImprovement: "qLogExpectedHypervolumeImprovement",
     qLogNoisyExpectedHypervolumeImprovement: "qLogNoisyExpectedHypervolumeImprovement",
     # info-theoretic acquisition functions
+    qDistanceWeightedImprovementOverThreshold: "qDistanceWeightedImprovementOverThreshold",
     qJointEntropySearch: "qJointEntropySearch",
     qSelfCorrectingBayesianOptimization: "qSelfCorrectingBayesianOptimization",
     qBayesianActiveLearningByDisagreement: "qBayesianActiveLearningByDisagreement",
