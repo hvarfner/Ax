@@ -128,12 +128,15 @@ def _filter_X_observed(
     # Filter to those that satisfy constraints.
     # Addded the rounding here to ensure that very small numbers (rounding errors)
     # caused by saving and loading does not run into issues with constraint evaluation
+    
     X_obs = filter_constraints_and_fixed_features(
-        X=torch.round(X_obs, decimals=6),
+        X=X_obs,
         bounds=bounds,
         linear_constraints=linear_constraints,
         fixed_features=fixed_features,
+        legit_violation=1e-6,
     )
+    
     if len(X_obs) > 0:
         return torch.as_tensor(X_obs)  # please the linter
 
