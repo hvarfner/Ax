@@ -555,6 +555,7 @@ def filter_constraints_and_fixed_features(
     bounds: Sequence[tuple[float, float]],
     linear_constraints: tuple[TTensoray, TTensoray] | None = None,
     fixed_features: dict[int, float] | None = None,
+    legit_violation: float = 1e-6,
 ) -> TTensoray:
     """Filter points to those that satisfy bounds, linear_constraints, and
     fixed_features.
@@ -578,10 +579,11 @@ def filter_constraints_and_fixed_features(
     X_np = X.cpu().numpy() if isinstance(X, torch.Tensor) else X
     feas = np.ones(X_np.shape[0], dtype=bool)  # (n)
     for i, b in enumerate(bounds):
-        feas &= (X_np[:, i] >= b[0]) & (X_np[:, i] <= b[1])
+        feas &= ((legit_violation + X_np[:, i]) >= b[0]) & ((X_np[:, i] - legit_violation) <= b[1])
     if linear_constraints is not None:
         A, b = as_array(linear_constraints)  # (m x d) and (m x 1)
-        feas &= (A @ X_np.transpose() <= b).all(axis=0)
+        feas &= (A @ X_np.transpose() <= (legit_violation + b)).all(axis=0)
+
     if fixed_features is not None:
         for idx, val in fixed_features.items():
             feas &= X_np[:, idx] == val

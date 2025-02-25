@@ -109,11 +109,13 @@ def _filter_X_observed(
             the constraints. None if there are no such points.
     """
     # Get points observed for all objective and constraint outcomes
+    # First come the pending obs
     X_obs = get_observed(
         Xs=Xs,
         objective_weights=objective_weights,
         outcome_constraints=outcome_constraints,
     )
+<<<<<<< Updated upstream
     if not fit_out_of_design:
         # Filter to those that satisfy constraints.
         X_obs = filter_constraints_and_fixed_features(
@@ -122,6 +124,20 @@ def _filter_X_observed(
             linear_constraints=linear_constraints,
             fixed_features=fixed_features,
         )
+=======
+    # Filter to those that satisfy constraints.
+    # Addded the rounding here to ensure that very small numbers (rounding errors)
+    # caused by saving and loading does not run into issues with constraint evaluation
+    
+    X_obs = filter_constraints_and_fixed_features(
+        X=X_obs,
+        bounds=bounds,
+        linear_constraints=linear_constraints,
+        fixed_features=fixed_features,
+        legit_violation=1e-6,
+    )
+    
+>>>>>>> Stashed changes
     if len(X_obs) > 0:
         return torch.as_tensor(X_obs)  # please the linter
 
