@@ -23,14 +23,7 @@ from botorch.acquisition.analytic import (
     LogNoisyExpectedImprovement,
     NoisyExpectedImprovement,
 )
-from botorch.acquisition.bayesian_active_learning import (
-    qBayesianActiveLearningByDisagreement,
-    qBayesianQueryByComittee,
-    qStatisticalDistanceActiveLearning
-)
-from botorch.acquisition.diversity import (
-    qDistanceWeightedImprovementOverThreshold,
-)
+
 from botorch.acquisition.knowledge_gradient import (
     qKnowledgeGradient,
     qMultiFidelityKnowledgeGradient,
@@ -47,6 +40,7 @@ from botorch.acquisition.monte_carlo import (
     qExpectedImprovement,
     qNoisyExpectedImprovement,
 )
+from botorch.acquisition.diversity import qDistanceWeightedImprovementOverThreshold
 from botorch.acquisition.multi_objective.logei import (
     qLogExpectedHypervolumeImprovement,
     qLogNoisyExpectedHypervolumeImprovement,
@@ -55,15 +49,10 @@ from botorch.acquisition.multi_objective.monte_carlo import (
     qExpectedHypervolumeImprovement,
     qNoisyExpectedHypervolumeImprovement,
 )
-<<<<<<< Updated upstream
 from botorch.acquisition.multi_objective.parego import qLogNParEGO
 from botorch.acquisition.preference import AnalyticExpectedUtilityOfBestOption
-=======
-from botorch.acquisition.joint_entropy_search import qJointEntropySearch
-from botorch.acquisition.scorebo import qSelfCorrectingBayesianOptimization
-from botorch.acquisition.active_learning import qNegIntegratedPosteriorVariance
->>>>>>> Stashed changes
 from botorch.models import SaasFullyBayesianSingleTaskGP
+from botorch.acquisition.active_learning import qNegIntegratedPosteriorVariance
 from botorch.models.contextual import LCEAGP
 from botorch.models.fully_bayesian import FullyBayesianLinearSingleTaskGP
 from botorch.models.fully_bayesian_multitask import SaasFullyBayesianMultiTaskGP
@@ -158,17 +147,8 @@ ACQUISITION_FUNCTION_REGISTRY: dict[type[AcquisitionFunction], str] = {
     qNegIntegratedPosteriorVariance: "qNegIntegratedPosteriorVariance",
     qLogExpectedHypervolumeImprovement: "qLogExpectedHypervolumeImprovement",
     qLogNoisyExpectedHypervolumeImprovement: "qLogNoisyExpectedHypervolumeImprovement",
-<<<<<<< Updated upstream
     qLogNParEGO: "qLogNParEGO",
-=======
-    # info-theoretic acquisition functions
     qDistanceWeightedImprovementOverThreshold: "qDistanceWeightedImprovementOverThreshold",
-    qJointEntropySearch: "qJointEntropySearch",
-    qSelfCorrectingBayesianOptimization: "qSelfCorrectingBayesianOptimization",
-    qBayesianActiveLearningByDisagreement: "qBayesianActiveLearningByDisagreement",
-    qBayesianQueryByComittee: "qBayesianQueryByComittee",
-    qStatisticalDistanceActiveLearning: "qStatisticalDistanceActiveLearning",
->>>>>>> Stashed changes
 }
 
 
@@ -195,10 +175,7 @@ GPYTORCH_COMPONENT_REGISTRY: dict[type[torch.nn.Module], str] = {
     Interval: "Interval",
     GammaPrior: "GammaPrior",
     LogNormalPrior: "LogNormalPrior",
-<<<<<<< Updated upstream
     SobolQMCNormalSampler: "SobolQMCNormalSampler",
-=======
->>>>>>> Stashed changes
 }
 
 """
